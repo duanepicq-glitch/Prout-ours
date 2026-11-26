@@ -49,6 +49,9 @@
   .chip { display: inline-flex; align-items: center; gap: 8px; background: #fff; border: 2px solid #d9dccf; border-radius: 999px; padding: 6px 14px; font-weight: 700; }
   .chip i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
   .count { width: 100%; font-size: 14px; opacity: .7; margin-top: 4px; }
+  .mapPick { display: flex; gap: 10px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .mapBtn { pointer-events: auto; font-family: inherit; font-weight: 700; font-size: 18px; color: #2f3a33; background: #fff; border: 3px solid #d9dccf; border-radius: 16px; padding: 10px 18px; cursor: pointer; }
+  .mapBtn.sel { border-color: #f08a3a; background: #fff3e6; box-shadow: 0 3px 0 #f08a3a; }
   .hudBtn { position: absolute; left: 16px; bottom: 20px; pointer-events: auto; font-family: inherit; font-weight: 700; font-size: 18px; color: #2f3a33; background: rgba(255,255,255,.92); border: none; border-radius: 999px; padding: 10px 18px; cursor: pointer; box-shadow: 0 4px 0 rgba(30,40,35,.25); }
   .hudBtn:hover { background: #fff; transform: translateY(-1px); }
   .hudBtn:active { transform: translateY(2px); box-shadow: 0 2px 0 rgba(30,40,35,.25); }
@@ -102,6 +105,10 @@
       <span class="key">Clic + souris</span><span>tourner la caméra</span>
       <span class="key">R / ↺</span><span>réinitialiser : revenir au dernier point de passage</span>
     </div>
+    <div class="mapPick">
+      <button class="mapBtn" data-map="vallee">🌲 La Vallée</button>
+      <button class="mapBtn" data-map="canyon">🏜️ Le Canyon</button>
+    </div>
     <input id="nameInput" class="field" maxlength="12" placeholder="Ton pseudo" autocomplete="off">
     <div class="menuBtns">
       <button class="big" id="playBtn">JOUER SEUL</button>
@@ -119,6 +126,7 @@
   <div class="card">
     <h1 class="title" style="font-size:52px">Le salon</h1>
     <p class="sub" id="lobbyInfo"></p>
+    <p class="sub" id="lobbyMap" style="font-weight:700"></p>
     <div class="codeBox"><span id="lobbyCode"></span><button id="copyBtn" class="mini">Copier</button></div>
     <div id="lobbyPlayers"></div>
     <button class="big" id="startBtn">LANCER LA DESCENTE</button>
@@ -188,7 +196,8 @@ const sky = new THREE.Mesh(
 );
 scene.add(sky);
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x5d7a4a, 1.25));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x5d7a4a, 1.25);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff1d8, 2.4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -287,32 +296,27 @@ const sfxCheck = () => { [523, 659, 784].forEach((f, i) => tone('triangle', f, f
 const sfxWin = () => { [523, 659, 784, 1047, 784, 1047].forEach((f, i) => tone('triangle', f, f, 0.25, 0.22, i * 0.12)); };
 const sfxTurn = () => tone('sine', 500, 750, 0.1, 0.12);
 
-// =============================================================== LA RIVIÈRE (tracé + relief)
-const PTS = [[0, 16], [0, -30], [14, -55], [14, -85], [-6, -110], [-6, -140], [8, -165], [8, -205]].map(([x, z]) => ({ x, z }));
-const WID = [18, 18, 21, 21, 16, 18, 18, 18];
-const FINISH_Z = -192;
-const segT = [], segLen = [], segCum = [0];
-for (let i = 0; i < PTS.length - 1; i++) {
-  const dx = PTS[i + 1].x - PTS[i].x, dz = PTS[i + 1].z - PTS[i].z, l = Math.hypot(dx, dz);
-  segT.push({ x: dx / l, z: dz / l }); segLen.push(l); segCum.push(segCum[i] + l);
-}
-const TOTAL = segCum[segCum.length - 1];
+// =============================================================== LES MAPS
+// Tout ce qui dépend de la map (rivière, relief, décor, obstacles) est rangé dans "world"
+// pour pouvoir changer de map sans recharger la page.
+const world = new THREE.Group();
+scene.add(world);
+const sphereGeo = new THREE.SphereGeometry(1, 24, 16);
+
+let MAP = null, PTS = [], WID = [], H_KEYS = [], POOLS = [];
+let segT = [], segLen = [], segCum = [0], TOTAL = 0, Lp = [], Rp = [];
+let FINISH_S = 0, SPAWN_S = 0;
+const walls = [];        // fermetures au départ / à l'arrivée (quand il n'y a pas de bassin)
+const circles = [];      // rochers (on rebondit dessus)
+const movers = [];       // obstacles à pointes qui bougent (mortels)
+const balls = [];        // boules à pointes (mortelles)
+const foams = [];        // ronds d'écume autour des obstacles
+const checkpoints = [];  // points de passage
+const whirls = [];       // tourbillons
+const spikeWalls = [];   // berges à pointes (mortelles)
+let flowTable = [];
 const leftN = t => ({ x: t.z, z: -t.x });
-const Lp = [], Rp = [];
-for (let i = 0; i < PTS.length; i++) {
-  let m, sc = 1;
-  if (i === 0) m = leftN(segT[0]);
-  else if (i === PTS.length - 1) m = leftN(segT[i - 1]);
-  else {
-    const a = segT[i - 1], b = segT[i];
-    let tx = a.x + b.x, tz = a.z + b.z; const l = Math.hypot(tx, tz); tx /= l; tz /= l;
-    m = leftN({ x: tx, z: tz });
-    const n = leftN(b); sc = 1 / (m.x * n.x + m.z * n.z);
-  }
-  const h = WID[i] / 2 * sc;
-  Lp.push({ x: PTS[i].x + m.x * h, z: PTS[i].z + m.z * h });
-  Rp.push({ x: PTS[i].x - m.x * h, z: PTS[i].z - m.z * h });
-}
+
 function halfWidthAt(s) {
   for (let i = 0; i < segLen.length; i++) {
     if (s <= segCum[i + 1] || i === segLen.length - 1) {
@@ -321,8 +325,7 @@ function halfWidthAt(s) {
     }
   }
 }
-// Hauteur de l'eau le long de la rivière : [distance, hauteur]
-const H_KEYS = [[0, 0], [30, 0], [46, -4], [100, -4], [114, -1.5], [184, -1.5], [202, -8], [400, -8]];
+// Hauteur de l'eau le long de la rivière
 function riverH(s) {
   if (s <= H_KEYS[0][0]) return H_KEYS[0][1];
   for (let i = 0; i < H_KEYS.length - 1; i++) {
@@ -350,6 +353,18 @@ function courseInfo(px, pz) {
   r.dist = Math.sqrt(best);
   return r;
 }
+// "Combien on est en dehors de l'eau" (négatif = dans l'eau) + la direction pour y revenir
+function waterRegion(x, z) {
+  const ci = courseInfo(x, z);
+  let e = ci.dist - halfWidthAt(ci.s);
+  let nx = ci.dist > 1e-6 ? (ci.qx - x) / ci.dist : 0, nz = ci.dist > 1e-6 ? (ci.qz - z) / ci.dist : 0;
+  if (ci.beyond > 0) e = Math.max(e, ci.beyond + 0.4);
+  for (const p of POOLS) {
+    const d = Math.hypot(x - p.x, z - p.z), ep = d - p.r;
+    if (ep < e) { e = ep; nx = d > 1e-6 ? (p.x - x) / d : 0; nz = d > 1e-6 ? (p.z - z) / d : 0; }
+  }
+  return { e, nx, nz, s: ci.s };
+}
 function pointAtS(s) {
   s = clamp(s, 0, TOTAL);
   for (let i = 0; i < segLen.length; i++) {
@@ -364,70 +379,55 @@ function smoothTangent(s) {
   const l = Math.hypot(b.x - a.x, b.z - a.z);
   return { x: (b.x - a.x) / l, z: (b.z - a.z) / l };
 }
-// point à une distance s le long de la rivière, décalé sur le côté
 function riverPoint(s, lat) {
   const p = pointAtS(s), seg = courseInfo(p.x, p.z).seg, ln = leftN(segT[seg]);
   return { x: p.x + ln.x * lat, z: p.z + ln.z * lat, y: riverH(s) };
 }
 const waterY = (x, z) => riverH(courseInfo(x, z).s);
+function flowAt(s) { const f = clamp(s / 0.5, 0, flowTable.length - 1), i = Math.floor(f), j = Math.min(i + 1, flowTable.length - 1); return flowTable[i] + (flowTable[j] - flowTable[i]) * (f - i); }
 
-// --------------------------------------------------------------- Le terrain (vallée)
+// --------------------------------------------------------------- Relief selon le thème de la map
 function hills(x, z) { return 1.0 + Math.sin(x * 0.08) * Math.cos(z * 0.07) * 1.1 + Math.sin(x * 0.19 + z * 0.13) * 0.5; }
 function terrainAt(x, z) {
-  const ci = courseInfo(x, z);
-  const hw = halfWidthAt(ci.s), base = riverH(ci.s);
-  let e = ci.dist - hw;
-  if (ci.beyond > 0) e = Math.max(e, ci.beyond + 0.4);
+  const wr = waterRegion(x, z), e = wr.e, base = riverH(wr.s);
   let y;
   if (e < -0.6) y = -2;
   else if (e < 0.6) y = -2 + sm((e + 0.6) / 1.2) * 2.35;
-  else if (e < 2.6) y = 0.35 + sm((e - 0.6) / 2) * 1.6;
-  else y = 1.95 + (hills(x, z) - 0.2) * sm((e - 2.6) / 8) + Math.pow(Math.max(0, e - 24), 1.15) * 0.45;
+  else if (MAP.theme.relief === 'canyon') {
+    if (e < 3) y = 0.35 + sm((e - 0.6) / 2.4) * 0.9;
+    else if (e < 9) y = 1.25 + (hills(x, z) - 0.2) * 0.4 * sm((e - 3) / 6);
+    else if (e < 13) y = 1.25 + (hills(x, z) - 0.2) * 0.4 + sm((e - 9) / 4) * 13;
+    else y = 14.25 + hills(x, z) * 0.8 + Math.max(0, e - 40) * 0.3;
+  } else {
+    if (e < 2.6) y = 0.35 + sm((e - 0.6) / 2) * 1.6;
+    else y = 1.95 + (hills(x, z) - 0.2) * sm((e - 2.6) / 8) + Math.pow(Math.max(0, e - 24), 1.15) * 0.45;
+  }
   return { y: base + y, e };
 }
-{
-  const X0 = -95, X1 = 105, Z0 = -265, Z1 = 55, RES = 0.8;
-  const nx = Math.round((X1 - X0) / RES) + 1, nz = Math.round((Z1 - Z0) / RES) + 1;
-  const pos = new Float32Array(nx * nz * 3), col = new Float32Array(nx * nz * 3);
-  const c = new THREE.Color(), cA = new THREE.Color(), cB = new THREE.Color();
-  const C_BED = new THREE.Color(0x56664a), C_SAND = new THREE.Color(0xcdb983), C_DIRT = new THREE.Color(0x8a6e4e);
-  const C_G1 = new THREE.Color(0x5c9a40), C_G2 = new THREE.Color(0x78b04f), C_ROCK = new THREE.Color(0x8c8a80), C_ROCK2 = new THREE.Color(0xa7a59b);
-  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
-    const x = X0 + i * RES, z = Z0 + j * RES, k = (j * nx + i) * 3;
-    const t = terrainAt(x, z);
-    pos[k] = x; pos[k + 1] = t.y; pos[k + 2] = z;
-    const e = t.e;
-    if (e < -0.3) c.copy(C_BED);
-    else if (e < 0.75) c.copy(C_SAND);
-    else if (e < 2.7) c.copy(C_DIRT).lerp(C_G1, sm((e - 1.8) / 0.9));
-    else {
-      const n = 0.5 + 0.5 * Math.sin(x * 0.31 + Math.sin(z * 0.2) * 2) * Math.sin(z * 0.27);
-      c.copy(C_G1).lerp(C_G2, n);
-      if (e > 22) c.lerp(C_ROCK, sm((e - 22) / 18));
-      if (e > 45) c.lerp(C_ROCK2, sm((e - 45) / 20));
+const _c = new THREE.Color(), _cA = new THREE.Color();
+function terrainColor(x, z, y, e, base) {
+  const th = MAP.theme;
+  if (e < -0.3) return _c.setHex(th.bed);
+  if (e < 0.75) return _c.setHex(th.sand);
+  const n = 0.5 + 0.5 * Math.sin(x * 0.31 + Math.sin(z * 0.2) * 2) * Math.sin(z * 0.27);
+  if (th.relief === 'canyon') {
+    if (e < 9) { _c.setHex(th.shore); if (n > 0.72 && e > 2) _c.lerp(_cA.setHex(th.scrub), 0.8); return _c; }
+    if (e < 13.2) {
+      const h = y - base;
+      const band = Math.sin(h * 1.25 + Math.sin(x * 0.05 + z * 0.04) * 1.5);
+      return _c.setHex(band > 0.35 ? th.cliff1 : band > -0.4 ? th.cliff2 : th.cliff3);
     }
-    col[k] = c.r; col[k + 1] = c.g; col[k + 2] = c.b;
+    _c.setHex(th.top1).lerp(_cA.setHex(th.top2), n);
+    return _c;
   }
-  const idx = new Uint32Array((nx - 1) * (nz - 1) * 6);
-  let p = 0;
-  for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx - 1; i++) {
-    const a = j * nx + i, b = (j + 1) * nx + i, cc = j * nx + i + 1, d = (j + 1) * nx + i + 1;
-    idx[p++] = a; idx[p++] = b; idx[p++] = cc; idx[p++] = cc; idx[p++] = b; idx[p++] = d;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  geo.setIndex(new THREE.BufferAttribute(idx, 1));
-  geo.computeVertexNormals();
-  const terrain = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: gradTex }));
-  terrain.receiveShadow = true;
-  scene.add(terrain);
+  if (e < 2.7) return _c.setHex(0x8a6e4e).lerp(_cA.setHex(th.grass1), sm((e - 1.8) / 0.9));
+  _c.setHex(th.grass1).lerp(_cA.setHex(th.grass2), n);
+  if (e > 22) _c.lerp(_cA.setHex(0x8c8a80), sm((e - 22) / 18));
+  if (e > 45) _c.lerp(_cA.setHex(0xa7a59b), sm((e - 45) / 20));
+  return _c;
 }
 
-// --------------------------------------------------------------- L'eau (ruban qui suit le relief)
-const flowTable = [];
-{ let F = 0; for (let s = 0; s <= 300; s += 0.5) { flowTable.push(F); F += 0.5 / (1 + 3 * Math.min(1, Math.abs(riverSlope(s)) * 2.5)); } }
-function flowAt(s) { const f = clamp(s / 0.5, 0, flowTable.length - 1), i = Math.floor(f), j = Math.min(i + 1, flowTable.length - 1); return flowTable[i] + (flowTable[j] - flowTable[i]) * (f - i); }
+// --------------------------------------------------------------- Matériaux partagés
 const waterMat = new THREE.ShaderMaterial({
   fog: true,
   uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
@@ -462,85 +462,16 @@ const waterMat = new THREE.ShaderMaterial({
       #include <fog_fragment>
     }`
 });
-{
-  const pos = [], aF = [], aU = [], aFoam = [], idx = [];
-  const STEP = 0.8, N = Math.ceil(TOTAL / STEP);
-  for (let k = 0; k <= N; k++) {
-    const s = Math.min(TOTAL, k * STEP), p = pointAtS(s), t = smoothTangent(s), ln = leftN(t);
-    const w = halfWidthAt(s) + 2.5, y = riverH(s);
-    pos.push(p.x + ln.x * w, y, p.z + ln.z * w, p.x - ln.x * w, y, p.z - ln.z * w);
-    const f = flowAt(s), foam = Math.min(1, Math.abs(riverSlope(s)) * 3.2);
-    aF.push(f, f); aU.push(0, 1); aFoam.push(foam, foam);
-    if (k < N) { const a = 2 * k; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setAttribute('aF', new THREE.Float32BufferAttribute(aF, 1));
-  geo.setAttribute('aU', new THREE.Float32BufferAttribute(aU, 1));
-  geo.setAttribute('aFoam', new THREE.Float32BufferAttribute(aFoam, 1));
-  geo.setIndex(idx);
-  scene.add(new THREE.Mesh(geo, waterMat));
-}
+// les bassins ronds passent "derrière" la rivière là où ils se chevauchent (pas de scintillement)
+const poolMat = waterMat.clone();
+poolMat.uniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { deep: { value: new THREE.Color() }, shallow: { value: new THREE.Color() } }]);
+poolMat.uniforms.t = waterMat.uniforms.t;
+poolMat.polygonOffset = true; poolMat.polygonOffsetFactor = 2; poolMat.polygonOffsetUnits = 2;
 
-// --------------------------------------------------------------- Décor : arbres, buissons, rochers, montagnes
-const sphereGeo = new THREE.SphereGeometry(1, 24, 16);
-function roundTree(x, y, z, s, col) {
-  const g = new THREE.Group();
-  const trunk = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.2 * s, 0.3 * s, 1.8 * s, 8), toon(0x6b4a2f)));
-  trunk.position.y = 0.9 * s; g.add(trunk);
-  const geo = new THREE.IcosahedronGeometry(1, 1);
-  [[0, 2.4, 0, 1.3], [0.7, 2.0, 0.2, 0.85], [-0.6, 2.05, -0.2, 0.8], [0, 3.1, 0.1, 0.8]].forEach(([px, py, pz, r]) => {
-    const b = shadowed(new THREE.Mesh(geo, toon(col))); b.position.set(px * s, py * s, pz * s); b.scale.setScalar(r * s); g.add(b);
-  });
-  g.position.set(x, y - 0.1, z); g.rotation.y = rand(0, 6); scene.add(g);
-}
-function pine(x, y, z, s, col) {
-  const g = new THREE.Group();
-  const trunk = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.18 * s, 0.26 * s, 1.2 * s, 7), toon(0x5e4129)));
-  trunk.position.y = 0.6 * s; g.add(trunk);
-  [[1.5, 1.9, 1.6], [1.15, 1.7, 2.7], [0.8, 1.5, 3.7]].forEach(([r, h, yy]) => {
-    const c = shadowed(new THREE.Mesh(new THREE.ConeGeometry(r * s, h * s, 8), toon(col))); c.position.y = yy * s; g.add(c);
-  });
-  g.position.set(x, y - 0.1, z); scene.add(g);
-}
-function bush(x, y, z, s) {
-  const g = new THREE.Group();
-  for (let i = 0; i < 3; i++) {
-    const b = shadowed(new THREE.Mesh(sphereGeo, toon(i % 2 ? 0x4e8a37 : 0x5f9c42)));
-    b.scale.set(0.7 * s, 0.55 * s, 0.7 * s); b.position.set(rand(-0.5, 0.5) * s, 0.3 * s, rand(-0.5, 0.5) * s); g.add(b);
-  }
-  g.position.set(x, y, z); scene.add(g);
-}
-function bankRock(x, y, z, s) {
-  const m = shadowed(new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), toon(Math.random() < 0.5 ? 0x85857c : 0x9a978d)));
-  m.position.set(x, y + s * 0.2, z); m.scale.y = 0.65; m.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3)); scene.add(m);
-}
-{
-  let placed = 0;
-  for (let n = 0; n < 2600 && placed < 230; n++) {
-    const x = rand(-70, 80), z = rand(-240, 40);
-    const t = terrainAt(x, z);
-    if (t.e < 3.5 || t.e > 34) continue;
-    if (Math.random() > 1.15 - t.e / 34) continue;
-    const r = Math.random();
-    if (r < 0.42) pine(x, t.y, z, rand(0.9, 1.5), Math.random() < 0.5 ? 0x2f6b45 : 0x3b7b4c);
-    else if (r < 0.7) roundTree(x, t.y, z, rand(0.9, 1.3), [0x4f9a3f, 0x5fa848, 0x3f8a3a, 0x6aa84a][Math.floor(rand(0, 4))]);
-    else if (r < 0.88) bush(x, t.y, z, rand(0.8, 1.4));
-    else bankRock(x, t.y, z, rand(0.5, 1.3));
-    placed++;
-  }
-  // montagnes au loin
-  for (let i = 0; i < 22; i++) {
-    const a = i / 22 * Math.PI * 2 + rand(-0.1, 0.1), d = rand(230, 300);
-    const h = rand(60, 120);
-    const m = new THREE.Mesh(new THREE.ConeGeometry(rand(60, 100), h, 7), toon(i % 2 ? 0x7d8a7a : 0x6f7f6c));
-    m.position.set(5 + Math.cos(a) * d, h / 2 - 15, -100 + Math.sin(a) * d); scene.add(m);
-    const snow = new THREE.Mesh(new THREE.ConeGeometry(18, h * 0.2, 7), toon(0xf2f4f5));
-    snow.position.set(m.position.x, h - 15 - h * 0.1 + 0.5, m.position.z); scene.add(snow);
-  }
-}
-
-// --------------------------------------------------------------- Arches de départ et d'arrivée
+const foamGeo = new THREE.TorusGeometry(1, 0.12, 6, 24);
+const foamMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 });
+const spikeGeo = new THREE.ConeGeometry(0.17, 0.6, 6);
+const spikeMat = toon(0xc9ccd2);
 function textTexture(text, w, h, bg, fg, size) {
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d');
@@ -551,59 +482,116 @@ function textTexture(text, w, h, bg, fg, size) {
   const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
 }
 await Promise.race([document.fonts.load('700 72px Fredoka'), new Promise(r => setTimeout(r, 1500))]).catch(() => {});
-function arch(s, text, bg, fg) {
-  const p = pointAtS(s), t = smoothTangent(s), ln = leftN(t), y = riverH(s);
-  const half = halfWidthAt(s) + 1.5;
+
+// --------------------------------------------------------------- Pièces de décor
+function roundTree(x, y, z, s, col, trunkCol = 0x6b4a2f) {
   const g = new THREE.Group();
-  for (const sg of [-1, 1]) {
-    const post = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 9, 10), toon(0x6b4a2f)));
-    post.position.set(sg * half, 3.6, 0); g.add(post);
-  }
-  const beam = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, half * 2 + 1, 10), toon(0x6b4a2f)));
-  beam.rotation.z = Math.PI / 2; beam.position.y = 7.6; g.add(beam);
-  const tex = textTexture(text, 1024, 192, bg, fg, 120);
-  const ban = new THREE.Mesh(new THREE.PlaneGeometry(9, 1.7), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
-  ban.position.set(0, 6.4, 0); g.add(ban);
-  for (const sg of [-1, 1]) { const rope = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.2, 4), toon(0xd8c79a)); rope.position.set(sg * 4.2, 7.0, 0); g.add(rope); }
-  g.position.set(p.x, y - 1, p.z); g.rotation.y = Math.atan2(ln.z, -ln.x);
-  scene.add(g);
+  const trunk = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.2 * s, 0.3 * s, 1.8 * s, 8), toon(trunkCol)));
+  trunk.position.y = 0.9 * s; g.add(trunk);
+  const geo = new THREE.IcosahedronGeometry(1, 1);
+  [[0, 2.4, 0, 1.3], [0.7, 2.0, 0.2, 0.85], [-0.6, 2.05, -0.2, 0.8], [0, 3.1, 0.1, 0.8]].forEach(([px, py, pz, r]) => {
+    const b = shadowed(new THREE.Mesh(geo, toon(col))); b.position.set(px * s, py * s, pz * s); b.scale.setScalar(r * s); g.add(b);
+  });
+  g.position.set(x, y - 0.1, z); g.rotation.y = rand(0, 6); world.add(g);
 }
-arch(19, 'DÉPART', '#2f5a3a', '#ffffff');
-const FINISH_S = courseInfo(8, FINISH_Z).s;
-arch(FINISH_S, 'ARRIVÉE', '#f2c14e', '#2f3a33');
-{
-  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 32;
-  const ctx = cv.getContext('2d');
-  for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { ctx.fillStyle = (i + j) % 2 ? '#ffffff' : '#1f2420'; ctx.fillRect(i * 16, j * 16, 16, 16); }
-  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.magFilter = THREE.NearestFilter;
-  const line = new THREE.Mesh(new THREE.PlaneGeometry(WID[6], 1.2), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.85 }));
-  line.rotation.x = -Math.PI / 2; line.position.set(8, riverH(FINISH_S) + 0.05, FINISH_Z); scene.add(line);
+function pine(x, y, z, s, col) {
+  const g = new THREE.Group();
+  const trunk = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.18 * s, 0.26 * s, 1.2 * s, 7), toon(0x5e4129)));
+  trunk.position.y = 0.6 * s; g.add(trunk);
+  [[1.5, 1.9, 1.6], [1.15, 1.7, 2.7], [0.8, 1.5, 3.7]].forEach(([r, h, yy]) => {
+    const c = shadowed(new THREE.Mesh(new THREE.ConeGeometry(r * s, h * s, 8), toon(col))); c.position.y = yy * s; g.add(c);
+  });
+  g.position.set(x, y - 0.1, z); world.add(g);
+}
+function bush(x, y, z, s, c1 = 0x4e8a37, c2 = 0x5f9c42) {
+  const g = new THREE.Group();
+  for (let i = 0; i < 3; i++) {
+    const b = shadowed(new THREE.Mesh(sphereGeo, toon(i % 2 ? c1 : c2)));
+    b.scale.set(0.7 * s, 0.55 * s, 0.7 * s); b.position.set(rand(-0.5, 0.5) * s, 0.3 * s, rand(-0.5, 0.5) * s); g.add(b);
+  }
+  g.position.set(x, y, z); world.add(g);
+}
+function bankRock(x, y, z, s, col) {
+  const m = shadowed(new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), toon(col ?? (Math.random() < 0.5 ? 0x85857c : 0x9a978d))));
+  m.position.set(x, y + s * 0.2, z); m.scale.y = 0.65; m.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3)); world.add(m);
+}
+// tas de gros cailloux gris (sur les rives du canyon)
+function boulderPile(x, y, z, s) {
+  const g = new THREE.Group();
+  const n = 3 + Math.floor(rand(0, 3));
+  for (let i = 0; i < n; i++) {
+    const r = rand(0.7, 1.3) * s;
+    const m = shadowed(new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), toon(i % 2 ? 0x6f6d6a : 0x84817c)));
+    m.position.set(rand(-1, 1) * s, r * 0.8 + (i > 2 ? r : 0), rand(-1, 1) * s); m.scale.y = rand(1.1, 1.8); m.rotation.set(rand(0, 1), rand(0, 6), rand(0, 1));
+    outline(m, 1.03); g.add(m);
+  }
+  g.position.set(x, y - 0.2, z); world.add(g);
+}
+// palmier
+function palm(x, y, z, s) {
+  const g = new THREE.Group();
+  const lean = rand(-0.35, 0.35), dir = rand(0, 6);
+  let px = 0, py = 0, pz = 0;
+  for (let i = 0; i < 6; i++) {
+    const seg = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.17 * s, 0.22 * s, 0.75 * s, 7), toon(i % 2 ? 0x9a7348 : 0x86623c)));
+    const a = lean * i / 6;
+    seg.position.set(px, py + 0.37 * s, pz); seg.rotation.set(0, 0, a); g.add(seg);
+    px -= Math.sin(a) * 0.72 * s; py += Math.cos(a) * 0.72 * s;
+  }
+  const top = new THREE.Group(); top.position.set(px, py, pz); g.add(top);
+  const leafGeo = new THREE.ConeGeometry(0.42 * s, 2.6 * s, 4); leafGeo.translate(0, 1.3 * s, 0);
+  for (let i = 0; i < 7; i++) {
+    const leaf = shadowed(new THREE.Mesh(leafGeo, toon(i % 2 ? 0x3f9a3a : 0x52b046)));
+    leaf.scale.z = 0.25;
+    leaf.rotation.set(0, i / 7 * Math.PI * 2, 0);
+    leaf.rotateX(1.15 + rand(-0.15, 0.2));
+    top.add(leaf);
+  }
+  for (let i = 0; i < 3; i++) { const c = new THREE.Mesh(sphereGeo, toon(0x6b4a2f)); c.scale.setScalar(0.18 * s); c.position.set(Math.cos(i * 2.1) * 0.25 * s, -0.15 * s, Math.sin(i * 2.1) * 0.25 * s); top.add(c); }
+  g.position.set(x, y - 0.1, z); g.rotation.y = dir; world.add(g);
+}
+// touffe de roseaux
+function reeds(x, y, z, s) {
+  const g = new THREE.Group();
+  for (let i = 0; i < 6; i++) {
+    const h = rand(1.0, 1.8) * s;
+    const r = new THREE.Mesh(new THREE.CylinderGeometry(0.04 * s, 0.06 * s, h, 5), toon(i % 2 ? 0x6fa83a : 0x82b844));
+    r.position.set(rand(-0.4, 0.4) * s, h / 2, rand(-0.4, 0.4) * s); r.rotation.set(rand(-0.15, 0.15), 0, rand(-0.15, 0.15)); g.add(r);
+    if (i % 2) { const tip = new THREE.Mesh(new THREE.CapsuleGeometry(0.08 * s, 0.3 * s, 3, 6), toon(0x7a5232)); tip.position.set(r.position.x, h + 0.1, r.position.z); g.add(tip); }
+  }
+  g.position.set(x, y - 0.1, z); world.add(g);
+}
+function lilyPads(n, area) {
+  const shape = new THREE.Shape(); shape.absarc(0, 0, 1, 0.35, Math.PI * 2 - 0.35, false); shape.lineTo(0, 0);
+  const geo = new THREE.ShapeGeometry(shape, 20);
+  for (let i = 0; i < n; i++) {
+    const p = area();
+    if (!p) continue;
+    const pad = new THREE.Mesh(geo, toon(0x4fae4a)); pad.rotation.set(-Math.PI / 2, 0, rand(0, 6));
+    pad.scale.setScalar(rand(0.6, 1.1)); pad.position.set(p.x, p.y + 0.06, p.z); world.add(pad);
+    if (MAP.theme.flowers && Math.random() < 0.45) {
+      const fl = new THREE.Group();
+      for (let k = 0; k < 5; k++) { const pe = new THREE.Mesh(sphereGeo, toon(0xf28bb0)); pe.scale.set(0.12, 0.08, 0.22); pe.position.set(Math.sin(k * 1.26) * 0.14, 0, Math.cos(k * 1.26) * 0.14); pe.rotation.y = k * 1.26; fl.add(pe); }
+      const heart = new THREE.Mesh(sphereGeo, toon(0xffd84a)); heart.scale.setScalar(0.08); heart.position.y = 0.05; fl.add(heart);
+      fl.position.copy(pad.position).add(new V3(0.25, 0.08, 0.1)); world.add(fl);
+    }
+  }
 }
 
 // --------------------------------------------------------------- Obstacles
-const walls = [];    // fermetures au départ et à l'arrivée
-walls.push({ a: Rp[0], b: Lp[0], th: 0.25 });
-walls.push({ a: Lp[PTS.length - 1], b: Rp[PTS.length - 1], th: 0.25 });
-const circles = [];  // rochers (on rebondit dessus)
-const movers = [];   // obstacles à pointes qui bougent (mortels)
-const balls = [];    // boules à pointes (mortelles)
-const foamGeo = new THREE.TorusGeometry(1, 0.12, 6, 24);
-const foamMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 });
-const foams = [];
 function foamRing(x, y, z, r, follow) {
-  const f = new THREE.Mesh(foamGeo, foamMat); f.rotation.x = -Math.PI / 2; f.position.set(x, y + 0.05, z); f.scale.setScalar(r); scene.add(f);
+  const f = new THREE.Mesh(foamGeo, foamMat); f.rotation.x = -Math.PI / 2; f.position.set(x, y + 0.05, z); f.scale.setScalar(r); world.add(f);
   foams.push({ f, r, ph: rand(0, 6), follow });
 }
-function rockAt(s, lat, r) {
-  const p = riverPoint(s, lat);
-  const m = shadowed(new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), toon(Math.random() < 0.5 ? 0x7e7d76 : 0x93918a)));
-  m.position.set(p.x, p.y + 0.1, p.z); m.scale.y = 0.75; m.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3)); scene.add(m);
+function rockXZ(x, z, r, col) {
+  const y = waterY(x, z);
+  const m = shadowed(new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), toon(col ?? (Math.random() < 0.5 ? 0x7e7d76 : 0x93918a))));
+  m.position.set(x, y + 0.1, z); m.scale.y = 0.75 + (col ? 0.5 : 0); m.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3)); world.add(m);
   outline(m, 1.04);
-  circles.push({ x: p.x, z: p.z, r: r * 0.92 });
-  foamRing(p.x, p.y, p.z, r * 1.05);
+  circles.push({ x, z, r: r * 0.92 });
+  foamRing(x, y, z, r * 1.05);
 }
-const spikeGeo = new THREE.ConeGeometry(0.17, 0.6, 6);
-const spikeMat = toon(0xc9ccd2);
+function rockAt(s, lat, r) { const p = riverPoint(s, lat); rockXZ(p.x, p.z, r); }
 function addSpike(parent, x, y, z, dir) {
   const s = new THREE.Mesh(spikeGeo, spikeMat);
   s.position.set(x, y, z);
@@ -611,10 +599,9 @@ function addSpike(parent, x, y, z, dir) {
   s.position.addScaledVector(dir.clone().normalize(), 0.25);
   s.castShadow = true; parent.add(s);
 }
-// Boule à pointes (fixe, ou qui va de gauche à droite)
 function spikeBall(s, lat, amp, speed) {
   const p = riverPoint(s, lat), ln = leftN(segT[courseInfo(p.x, p.z).seg]);
-  const g = new THREE.Group(); scene.add(g);
+  const g = new THREE.Group(); world.add(g);
   const core = shadowed(new THREE.Mesh(new THREE.IcosahedronGeometry(0.9, 2), toon(0x3a3d42))); g.add(core); outline(core, 1.05);
   const dirs = new THREE.IcosahedronGeometry(1, 0).attributes.position, seen = new Set();
   for (let i = 0; i < dirs.count; i++) {
@@ -626,10 +613,9 @@ function spikeBall(s, lat, amp, speed) {
   balls.push(b);
   foamRing(p.x, p.y, p.z, 1.3, b);
 }
-// Tronc à pointes qui tourne
 function spikedLog(s, half, speed) {
   const p = riverPoint(s, 0);
-  const g = new THREE.Group(); g.position.set(p.x, p.y + 0.4, p.z); scene.add(g);
+  const g = new THREE.Group(); g.position.set(p.x, p.y + 0.4, p.z); world.add(g);
   const log = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, half * 2, 14), toon(0x7a5232)));
   log.rotation.z = Math.PI / 2; g.add(log); outline(log, 1.04);
   for (const sg of [-1, 1]) {
@@ -643,15 +629,14 @@ function spikedLog(s, half, speed) {
     }
   }
   const post = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.95, 3.2, 14), toon(0x8a8a84)));
-  post.position.set(p.x, p.y + 0.6, p.z); scene.add(post); outline(post, 1.04);
+  post.position.set(p.x, p.y + 0.6, p.z); world.add(post); outline(post, 1.04);
   circles.push({ x: p.x, z: p.z, r: 0.95 });
   foamRing(p.x, p.y, p.z, 1.2);
   movers.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 }, th: 1.0, kind: 'rot', cx: p.x, cz: p.z, half, w: speed, group: g });
 }
-// Barrière à pointes qui coulisse
 function spikedGate(s, half, amp, speed, phase) {
   const p = riverPoint(s, 0), ln = leftN(segT[courseInfo(p.x, p.z).seg]);
-  const g = new THREE.Group(); scene.add(g);
+  const g = new THREE.Group(); world.add(g);
   const bar = shadowed(new THREE.Mesh(new RoundedBoxGeometry(half * 2, 0.9, 0.8, 2, 0.25), toon(0x9c3b2c))); g.add(bar); outline(bar, 1.04);
   for (let i = -1; i <= 1; i++) { const st = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.92, 0.82), toon(0xe9e2d0)); st.position.x = i * half * 0.6; g.add(st); }
   for (let xx = -half + 0.4; xx <= half - 0.3; xx += 0.7) {
@@ -662,22 +647,8 @@ function spikedGate(s, half, amp, speed, phase) {
   g.rotation.y = Math.atan2(ln.z, -ln.x);
   movers.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 }, th: 0.75, kind: 'slide', cx: p.x, cz: p.z, y: p.y, lx: ln.x, lz: ln.z, half, amp, speed, phase, mesh: g });
 }
-
-// Section 1 : premières boules et rochers
-rockAt(22, -1, 1.5); spikeBall(34, 4.2, 0, 0); rockAt(44, -1.5, 1.3);
-// Section 2 : une boule qui balaie la rivière
-spikeBall(63, 0, 4, 0.7);
-// Section 3 : le tronc à pointes
-spikedLog(90, 4.5, 0.45);
-// Section 4 : montée avec rochers et une boule qui bouge
-rockAt(115, -1.5, 1.4); spikeBall(122, -6, 0, 0); rockAt(128, 1.2, 1.2);
-// Section 5 : barrières à pointes
-spikedGate(147, 2.2, 5.5, 0.7, 0);
-spikedGate(158, 2.2, 5.5, 0.7, -1.5);
-// Section 6 : tourbillon puis grand rapide
-const whirl = { x: 1, z: -152.5, r: 6.5 };
-whirl.y = waterY(whirl.x, whirl.z);
-{
+function whirlpool(x, z, r) {
+  const w = { x, z, r, y: waterY(x, z) };
   const cv = document.createElement('canvas'); cv.width = cv.height = 256;
   const ctx = cv.getContext('2d');
   ctx.translate(128, 128);
@@ -692,29 +663,323 @@ whirl.y = waterY(whirl.x, whirl.z);
   const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, 128); grd.addColorStop(0, 'rgba(5,40,60,0.6)'); grd.addColorStop(1, 'rgba(5,40,60,0)');
   ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(0, 0, 128, 0, 7); ctx.fill();
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
-  whirl.mesh = new THREE.Mesh(new THREE.CircleGeometry(whirl.r, 40), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
-  whirl.mesh.rotation.x = -Math.PI / 2; whirl.mesh.position.set(whirl.x, whirl.y + 0.04, whirl.z); scene.add(whirl.mesh);
+  w.mesh = new THREE.Mesh(new THREE.CircleGeometry(r, 40), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  w.mesh.rotation.x = -Math.PI / 2; w.mesh.position.set(x, w.y + 0.04, z); world.add(w.mesh);
+  whirls.push(w);
 }
-// Section 7 : en bas du rapide, dernier passage avant l'arrivée
-rockAt(204, -1.5, 1.4); spikeBall(210, -4.5, 3, 0.9); spikeBall(217, 4.5, 0, 0);
-
-// Points de passage (bouées)
-const checkpoints = [];
-for (let i = 1; i < PTS.length - 1; i++) {
-  const s = segCum[i];
-  const cp = { i, s, x: PTS[i].x, z: PTS[i].z, buoys: [], active: false };
-  for (const sg of [1, -1]) {
-    const p = riverPoint(s, sg * (halfWidthAt(s) - 1.3));
-    const b = new THREE.Group();
-    const ball = shadowed(new THREE.Mesh(sphereGeo, toon(0xffffff))); ball.scale.setScalar(0.55); b.add(ball);
-    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.565, 0.565, 0.25, 16), new THREE.MeshToonMaterial({ color: 0xe0432f, gradientMap: gradTex }));
-    b.add(band);
-    const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.8, 6), toon(0xffffff)); stick.position.y = 0.7; b.add(stick);
-    b.position.set(p.x, p.y + 0.2, p.z); scene.add(b);
-    cp.buoys.push({ g: b, band, y: p.y });
+function arch(s, text, bg, fg, wood = 0x6b4a2f) {
+  const p = pointAtS(s), t = smoothTangent(s), ln = leftN(t), y = riverH(s);
+  const half = halfWidthAt(s) + 1.5;
+  const g = new THREE.Group();
+  for (const sg of [-1, 1]) {
+    const post = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 9, 10), toon(wood)));
+    post.position.set(sg * half, 3.6, 0); g.add(post);
   }
-  checkpoints.push(cp);
+  const beam = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, half * 2 + 1, 10), toon(wood)));
+  beam.rotation.z = Math.PI / 2; beam.position.y = 7.6; g.add(beam);
+  const tex = textTexture(text, 1024, 192, bg, fg, 120);
+  const ban = new THREE.Mesh(new THREE.PlaneGeometry(9, 1.7), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  ban.position.set(0, 6.4, 0); g.add(ban);
+  for (const sg of [-1, 1]) { const rope = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.2, 4), toon(0xd8c79a)); rope.position.set(sg * 4.2, 7.0, 0); g.add(rope); }
+  g.position.set(p.x, y - 1, p.z); g.rotation.y = Math.atan2(ln.z, -ln.x);
+  world.add(g);
 }
+function finishLine(s) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 32;
+  const ctx = cv.getContext('2d');
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { ctx.fillStyle = (i + j) % 2 ? '#ffffff' : '#1f2420'; ctx.fillRect(i * 16, j * 16, 16, 16); }
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.magFilter = THREE.NearestFilter;
+  const p = pointAtS(s), t = smoothTangent(s), ln = leftN(t);
+  const line = new THREE.Mesh(new THREE.PlaneGeometry(halfWidthAt(s) * 2, 1.2), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.85 }));
+  line.rotation.order = 'YXZ'; line.rotation.set(-Math.PI / 2, Math.atan2(ln.z, -ln.x), 0);
+  line.position.set(p.x, riverH(s) + 0.05, p.z); world.add(line);
+}
+// Berge à pointes : une rangée de pointes le long d'un bord de la rivière (side : 1 = gauche, -1 = droite)
+const SPIKE_DEPTH = 0.9;
+const plankGeo = new THREE.BoxGeometry(0.95, 1.0, 0.3);
+function spikeWall(s0, s1, side) {
+  spikeWalls.push({ s0, s1, side });
+  const pts = [];
+  for (let s = s0; s <= s1; s += 0.9) pts.push(s);
+  const spikes = new THREE.InstancedMesh(spikeGeo, spikeMat, pts.length * 2);
+  const planks = new THREE.InstancedMesh(plankGeo, toon(0x5a3d26), pts.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(1.7, 1.7, 1.7), one = new V3(1, 1, 1), up = new V3(0, 1, 0);
+  pts.forEach((s, i) => {
+    const p = pointAtS(s), t = smoothTangent(s), ln = leftN(t), hw = halfWidthAt(s), y = riverH(s);
+    const bx = p.x + ln.x * side * (hw - 0.05), bz = p.z + ln.z * side * (hw - 0.05);
+    // planche
+    q.setFromAxisAngle(up, Math.atan2(-t.z, t.x));
+    m.compose(new V3(bx, y + 0.35, bz), q, one); planks.setMatrixAt(i, m);
+    // deux pointes qui regardent vers le milieu de la rivière
+    const dir = new V3(-ln.x * side, 0, -ln.z * side);
+    q.setFromUnitVectors(up, dir);
+    for (let k = 0; k < 2; k++) {
+      const yy = y + 0.15 + k * 0.45, off = 0.5 + (k ? 0.05 : 0);
+      m.compose(new V3(bx + dir.x * off + t.x * (k ? 0.45 : 0), yy, bz + dir.z * off + t.z * (k ? 0.45 : 0)), q, sc);
+      spikes.setMatrixAt(i * 2 + k, m);
+    }
+  });
+  spikes.castShadow = planks.castShadow = true; planks.receiveShadow = true;
+  world.add(planks, spikes);
+}
+function makeCheckpoints() {
+  for (let i = MAP.cpEvery || 1; i < PTS.length - 1; i += MAP.cpEvery || 1) {
+    const s = segCum[i];
+    const cp = { i, s, x: PTS[i].x, z: PTS[i].z, buoys: [], active: false };
+    for (const sg of [1, -1]) {
+      const p = riverPoint(s, sg * (halfWidthAt(s) - 1.3));
+      const b = new THREE.Group();
+      const ball = shadowed(new THREE.Mesh(sphereGeo, toon(0xffffff))); ball.scale.setScalar(0.55); b.add(ball);
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.565, 0.565, 0.25, 16), new THREE.MeshToonMaterial({ color: 0xe0432f, gradientMap: gradTex }));
+      b.add(band);
+      const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.8, 6), toon(0xffffff)); stick.position.y = 0.7; b.add(stick);
+      b.position.set(p.x, p.y + 0.2, p.z); world.add(b);
+      cp.buoys.push({ g: b, band, y: p.y });
+    }
+    checkpoints.push(cp);
+  }
+}
+// place des éléments de décor au hasard sur la terre ferme
+function scatter(count, tries, area, place) {
+  let placed = 0;
+  for (let n = 0; n < tries && placed < count; n++) {
+    const x = rand(area[0], area[1]), z = rand(area[2], area[3]);
+    const t = terrainAt(x, z);
+    if (place(x, t.y, z, t.e)) placed++;
+  }
+}
+
+// --------------------------------------------------------------- Les deux maps
+const MAPS = {
+  vallee: {
+    name: 'La Vallée', emoji: '🌲',
+    pts: [[0, 16], [0, -30], [14, -55], [14, -85], [-6, -110], [-6, -140], [8, -165], [8, -205]],
+    wid: [18, 18, 21, 21, 16, 18, 18, 18],
+    hkeys: [[0, 0], [30, 0], [46, -4], [100, -4], [114, -1.5], [184, -1.5], [202, -8], [400, -8]],
+    pools: [], spawnS: 12, startArchS: 19, finishS: 222.6,
+    grid: [-95, 105, -265, 55],
+    theme: {
+      relief: 'vallee', sky: [0x3f8fdc, 0xc4dcec, 0xd6e2e6], fog: 0xc4dcec, ground: 0x5d7a4a, sun: 0xfff1d8,
+      water: [0x1b6a86, 0x3a9db0], bed: 0x56664a, sand: 0xcdb983, grass1: 0x5c9a40, grass2: 0x78b04f, flowers: false,
+    },
+    obstacles() {
+      rockAt(22, -1, 1.5); spikeBall(34, 4.2, 0, 0); rockAt(44, -1.5, 1.3);
+      spikeBall(63, 0, 4, 0.7);
+      spikedLog(90, 4.5, 0.45);
+      rockAt(115, -1.5, 1.4); spikeBall(122, -6, 0, 0); rockAt(128, 1.2, 1.2);
+      spikedGate(147, 2.2, 5.5, 0.7, 0);
+      spikedGate(158, 2.2, 5.5, 0.7, -1.5);
+      whirlpool(1, -152.5, 6.5);
+      rockAt(204, -1.5, 1.4); spikeBall(210, -4.5, 3, 0.9); spikeBall(217, 4.5, 0, 0);
+    },
+    decor() {
+      scatter(230, 2600, [-70, 80, -240, 40], (x, y, z, e) => {
+        if (e < 3.5 || e > 34 || Math.random() > 1.15 - e / 34) return false;
+        const r = Math.random();
+        if (r < 0.42) pine(x, y, z, rand(0.9, 1.5), Math.random() < 0.5 ? 0x2f6b45 : 0x3b7b4c);
+        else if (r < 0.7) roundTree(x, y, z, rand(0.9, 1.3), [0x4f9a3f, 0x5fa848, 0x3f8a3a, 0x6aa84a][Math.floor(rand(0, 4))]);
+        else if (r < 0.88) bush(x, y, z, rand(0.8, 1.4));
+        else bankRock(x, y, z, rand(0.5, 1.3));
+        return true;
+      });
+      for (let i = 0; i < 22; i++) {
+        const a = i / 22 * Math.PI * 2 + rand(-0.1, 0.1), d = rand(230, 300), h = rand(60, 120);
+        const m = new THREE.Mesh(new THREE.ConeGeometry(rand(60, 100), h, 7), toon(i % 2 ? 0x7d8a7a : 0x6f7f6c));
+        m.position.set(5 + Math.cos(a) * d, h / 2 - 15, -100 + Math.sin(a) * d); world.add(m);
+        const snow = new THREE.Mesh(new THREE.ConeGeometry(18, h * 0.2, 7), toon(0xf2f4f5));
+        snow.position.set(m.position.x, h - 15 - h * 0.1 + 0.5, m.position.z); world.add(snow);
+      }
+      lilyPads(30, () => { const s = rand(0, TOTAL); return riverPoint(s, (Math.random() < 0.5 ? 1 : -1) * (halfWidthAt(s) - rand(0.8, 2))); });
+    },
+  },
+  canyon: {
+    name: 'Le Canyon', emoji: '🏜️',
+    // parcours sinueux : plein de virages, des berges à pointes à l'extérieur des virages
+    pts: [[0, 10], [0, -20], [-12, -38], [-26, -50], [-30, -70], [-20, -90], [0, -100], [18, -112], [24, -132], [14, -152], [-2, -165], [-4, -185], [0, -200]],
+    wid: [18, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 18],
+    hkeys: [[0, 0], [34, 0], [48, -4], [95, -4], [108, -9], [150, -9], [160, -7], [198, -7], [214, -12], [400, -12]],
+    pools: [{ x: 0, z: 10, r: 15 }, { x: 0, z: -212, r: 14 }],
+    spawnS: 0, startArchS: 20, finishS: 251, cpEvery: 2,
+    grid: [-115, 100, -290, 75],
+    theme: {
+      relief: 'canyon', sky: [0x3aa0f0, 0xd6ecf7, 0xf2e8d8], fog: 0xe8e4da, ground: 0xc49a6a, sun: 0xfff0d0,
+      water: [0x0f9fbe, 0x4fd6e6], bed: 0x3c8f86, sand: 0xf0d59c, shore: 0xe6c690, scrub: 0x9db85a,
+      cliff1: 0xd8743f, cliff2: 0xeaa05a, cliff3: 0xc25a38, top1: 0x9fc25a, top2: 0x86ad48, flowers: true,
+    },
+    obstacles() {
+      // rochers sur le bord du bassin de départ
+      rockXZ(11, 16, 1.6, 0x77736e); rockXZ(-10, 18, 1.4, 0x77736e); rockXZ(-10.5, 3, 1.2, 0x77736e);
+      // berges à pointes (côté : 1 = gauche, -1 = droite)
+      spikeWall(24, 40, -1);
+      spikeWall(44, 58, -1); rockAt(52, 2, 1.2);
+      spikeWall(64, 98, 1);
+      spikeWall(80, 92, -1);                 // couloir étroit : pointes des deux côtés
+      spikeWall(104, 122, 1);
+      spikeWall(128, 142, -1);
+      { const p = riverPoint(146, 0); whirlpool(p.x, p.z, 5.5); }
+      spikeWall(152, 186, -1);
+      spikeWall(162, 174, 1);                // couloir étroit dans la montée
+      spikeWall(194, 208, -1);
+      spikeWall(214, 228, 1);
+      spikeWall(234, 246, 1); rockAt(239, -2, 1.2);
+      // rochers sur le bord du bassin d'arrivée
+      rockXZ(9, -220, 1.5, 0x77736e); rockXZ(-10, -216, 1.3, 0x77736e);
+    },
+    decor() {
+      scatter(170, 3000, [-90, 75, -270, 60], (x, y, z, e) => {
+        if (e > 1.6 && e < 7.5) {
+          const r = Math.random();
+          if (r < 0.5) palm(x, y, z, rand(0.9, 1.3));
+          else if (r < 0.75) bush(x, y, z, rand(0.7, 1.2), 0x6f9a3a, 0x86ad48);
+          else boulderPile(x, y, z, rand(0.7, 1.1));
+          return true;
+        }
+        if (e > 14.5 && e < 40 && Math.random() < 0.5) {
+          if (Math.random() < 0.6) roundTree(x, y, z, rand(1.0, 1.5), Math.random() < 0.5 ? 0x4f9a3f : 0x5fae48, 0x5e4129);
+          else bush(x, y, z, rand(1, 1.6), 0x6f9a3a, 0x86ad48);
+          return true;
+        }
+        return false;
+      });
+      scatter(90, 2500, [-60, 50, -250, 40], (x, y, z, e) => { if (e < 0.4 || e > 1.6) return false; reeds(x, y, z, rand(0.8, 1.2)); return true; });
+      // plateaux lointains
+      for (let i = 0; i < 18; i++) {
+        const a = i / 18 * Math.PI * 2 + rand(-0.1, 0.1), d = rand(200, 260), h = rand(30, 55), w = rand(40, 70);
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.8, w, h, 8), toon(i % 2 ? 0xd27a48 : 0xe29a5c));
+        m.position.set(10 + Math.cos(a) * d, h / 2 + 5, -100 + Math.sin(a) * d); world.add(m);
+        const top = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.8, w * 0.8, 1.5, 8), toon(0x9fc25a));
+        top.position.set(m.position.x, h + 5.7, m.position.z); world.add(top);
+      }
+      const inPool = p => () => { const a = rand(0, 6.28), r = rand(3, p.r - 1.5); return { x: p.x + Math.cos(a) * r, z: p.z + Math.sin(a) * r, y: riverH(courseInfo(p.x, p.z).s) }; };
+      lilyPads(16, inPool(POOLS[0])); lilyPads(12, inPool(POOLS[1]));
+      lilyPads(20, () => { const s = rand(20, TOTAL - 20); return riverPoint(s, (Math.random() < 0.5 ? 1 : -1) * (halfWidthAt(s) - rand(0.8, 2))); });
+    },
+  },
+};
+
+// --------------------------------------------------------------- Construction d'une map
+let mapId = '';
+function disposeTree(o) { o.traverse(c => { if (c.geometry && c.geometry !== sphereGeo && c.geometry !== foamGeo && c.geometry !== spikeGeo) c.geometry.dispose(); }); }
+function buildMap(id) {
+  if (!MAPS[id]) id = 'vallee';
+  mapId = id; MAP = MAPS[id];
+  // on vide l'ancienne map
+  for (const c of [...world.children]) { world.remove(c); disposeTree(c); }
+  for (const a of [walls, circles, movers, balls, foams, checkpoints, whirls, spikeWalls]) a.length = 0;
+  // le tracé
+  PTS = MAP.pts.map(([x, z]) => ({ x, z })); WID = MAP.wid; H_KEYS = MAP.hkeys;
+  segT = []; segLen = []; segCum = [0];
+  for (let i = 0; i < PTS.length - 1; i++) {
+    const dx = PTS[i + 1].x - PTS[i].x, dz = PTS[i + 1].z - PTS[i].z, l = Math.hypot(dx, dz);
+    segT.push({ x: dx / l, z: dz / l }); segLen.push(l); segCum.push(segCum[i] + l);
+  }
+  TOTAL = segCum[segCum.length - 1];
+  POOLS = MAP.pools.map(p => ({ ...p }));
+  FINISH_S = MAP.finishS; SPAWN_S = MAP.spawnS;
+  Lp = []; Rp = [];
+  for (let i = 0; i < PTS.length; i++) {
+    let m, sc = 1;
+    if (i === 0) m = leftN(segT[0]);
+    else if (i === PTS.length - 1) m = leftN(segT[i - 1]);
+    else {
+      const a = segT[i - 1], b = segT[i];
+      let tx = a.x + b.x, tz = a.z + b.z; const l = Math.hypot(tx, tz); tx /= l; tz /= l;
+      m = leftN({ x: tx, z: tz });
+      const n = leftN(b); sc = 1 / (m.x * n.x + m.z * n.z);
+    }
+    const h = WID[i] / 2 * sc;
+    Lp.push({ x: PTS[i].x + m.x * h, z: PTS[i].z + m.z * h });
+    Rp.push({ x: PTS[i].x - m.x * h, z: PTS[i].z - m.z * h });
+  }
+  // fermetures quand il n'y a pas de bassin au bout
+  const poolAt = p => POOLS.some(q => Math.hypot(q.x - p.x, q.z - p.z) < q.r);
+  if (!poolAt(PTS[0])) walls.push({ a: Rp[0], b: Lp[0], th: 0.25 });
+  if (!poolAt(PTS[PTS.length - 1])) walls.push({ a: Lp[PTS.length - 1], b: Rp[PTS.length - 1], th: 0.25 });
+  flowTable = [];
+  { let F = 0; for (let s = 0; s <= TOTAL + 60; s += 0.5) { flowTable.push(F); F += 0.5 / (1 + 3 * Math.min(1, Math.abs(riverSlope(s)) * 2.5)); } }
+
+  // ambiance (ciel, brouillard, lumière, couleur de l'eau)
+  const th = MAP.theme;
+  sky.material.uniforms.top.value.setHex(th.sky[0]); sky.material.uniforms.mid.value.setHex(th.sky[1]); sky.material.uniforms.bottom.value.setHex(th.sky[2]);
+  scene.background.setHex(th.fog); scene.fog.color.setHex(th.fog);
+  hemi.groundColor.setHex(th.ground); sun.color.setHex(th.sun);
+  for (const m of [waterMat, poolMat]) { m.uniforms.deep.value.setHex(th.water[0]); m.uniforms.shallow.value.setHex(th.water[1]); }
+
+  // le terrain
+  {
+    const [X0, X1, Z0, Z1] = MAP.grid, RES = 0.8;
+    const nx = Math.round((X1 - X0) / RES) + 1, nz = Math.round((Z1 - Z0) / RES) + 1;
+    const pos = new Float32Array(nx * nz * 3), col = new Float32Array(nx * nz * 3);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const x = X0 + i * RES, z = Z0 + j * RES, k = (j * nx + i) * 3;
+      const t = terrainAt(x, z);
+      pos[k] = x; pos[k + 1] = t.y; pos[k + 2] = z;
+      const c = terrainColor(x, z, t.y, t.e, riverH(courseInfo(x, z).s));
+      col[k] = c.r; col[k + 1] = c.g; col[k + 2] = c.b;
+    }
+    const idx = new Uint32Array((nx - 1) * (nz - 1) * 6);
+    let p = 0;
+    for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx - 1; i++) {
+      const a = j * nx + i, b = (j + 1) * nx + i, cc = j * nx + i + 1, d = (j + 1) * nx + i + 1;
+      idx[p++] = a; idx[p++] = b; idx[p++] = cc; idx[p++] = cc; idx[p++] = b; idx[p++] = d;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    geo.computeVertexNormals();
+    const terrain = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: gradTex }));
+    terrain.receiveShadow = true;
+    world.add(terrain);
+  }
+  // l'eau de la rivière (ruban qui suit le relief)
+  {
+    const pos = [], aF = [], aU = [], aFoam = [], idx = [];
+    // la rivière s'arrête au bord des bassins ronds (sinon on voit un rectangle dans le bassin)
+    const inPool = s => { const q = pointAtS(s); return POOLS.some(p => Math.hypot(q.x - p.x, q.z - p.z) < p.r - 2); };
+    let s0 = 0, s1 = TOTAL;
+    while (s0 < TOTAL && inPool(s0)) s0 += 0.5;
+    while (s1 > s0 && inPool(s1)) s1 -= 0.5;
+    const STEP = 0.8, N = Math.max(1, Math.ceil((s1 - s0) / STEP));
+    for (let k = 0; k <= N; k++) {
+      const s = Math.min(s1, s0 + k * STEP), p = pointAtS(s), t = smoothTangent(s), ln = leftN(t);
+      const w = halfWidthAt(s) + 2.5, y = riverH(s);
+      pos.push(p.x + ln.x * w, y, p.z + ln.z * w, p.x - ln.x * w, y, p.z - ln.z * w);
+      const f = flowAt(s), foam = Math.min(1, Math.abs(riverSlope(s)) * 3.2);
+      aF.push(f, f); aU.push(0, 1); aFoam.push(foam, foam);
+      if (k < N) { const a = 2 * k; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aF', new THREE.Float32BufferAttribute(aF, 1));
+    geo.setAttribute('aU', new THREE.Float32BufferAttribute(aU, 1));
+    geo.setAttribute('aFoam', new THREE.Float32BufferAttribute(aFoam, 1));
+    geo.setIndex(idx);
+    world.add(new THREE.Mesh(geo, waterMat));
+  }
+  // les bassins ronds
+  for (const p of POOLS) {
+    const geo = new THREE.CircleGeometry(p.r + 2.5, 64);
+    const n = geo.attributes.position.count, pa = geo.attributes.position, R2 = p.r + 2.5;
+    const fArr = [], uArr = [];
+    for (let i = 0; i < n; i++) { fArr.push(pa.getY(i) * 0.45); uArr.push(0.5 + pa.getX(i) / (2 * R2) * 0.6); }
+    geo.setAttribute('aF', new THREE.Float32BufferAttribute(fArr, 1));
+    geo.setAttribute('aU', new THREE.Float32BufferAttribute(uArr, 1));
+    geo.setAttribute('aFoam', new THREE.Float32BufferAttribute(new Array(n).fill(0), 1));
+    const m = new THREE.Mesh(geo, poolMat);
+    m.rotation.x = -Math.PI / 2; m.position.set(p.x, riverH(courseInfo(p.x, p.z).s), p.z);
+    world.add(m);
+  }
+  // arches, ligne d'arrivée, obstacles, points de passage, décor
+  arch(MAP.startArchS, 'DÉPART', '#2f5a3a', '#ffffff');
+  arch(FINISH_S, 'ARRIVÉE', '#f2c14e', '#2f3a33');
+  finishLine(FINISH_S);
+  MAP.obstacles();
+  makeCheckpoints();
+  MAP.decor();
+}
+
+buildMap('vallee');
 
 // =============================================================== LE RADEAU GONFLABLE
 const RING = 2.1;           // rayon du boudin (où s'assoient les joueurs)
@@ -924,7 +1189,7 @@ function respawnFx() {
 }
 function placeAtCheckpoint() {
   let p, t;
-  if (cpIndex < 0) { p = { x: 0, z: 4 }; t = segT[0]; }
+  if (cpIndex < 0) { p = pointAtS(SPAWN_S); t = segT[0]; }
   else { const cp = checkpoints[cpIndex]; p = { x: cp.x, z: cp.z }; t = segT[cp.i]; }
   boat.x = p.x; boat.z = p.z; boat.vx = boat.vz = 0; boat.w = 0;
   boat.psi = Math.atan2(-t.x, -t.z);
@@ -1091,8 +1356,8 @@ let deadlyHit = false;
 function collideBoat() {
   let hit = 0;
   // les berges : le radeau reste dans la rivière
-  const ci = courseInfo(boat.x, boat.z), lim = halfWidthAt(ci.s) - BOAT_R;
-  if (ci.dist > lim && ci.dist > 1e-6) hit = Math.max(hit, resolveContact((ci.qx - boat.x) / ci.dist, (ci.qz - boat.z) / ci.dist, ci.dist - lim));
+  const wr = waterRegion(boat.x, boat.z);
+  if (wr.e > -BOAT_R && (wr.nx || wr.nz)) hit = Math.max(hit, resolveContact(wr.nx, wr.nz, wr.e + BOAT_R));
   for (const w of walls) {
     const q = closestOnSeg(boat.x, boat.z, w.a, w.b);
     const dx = boat.x - q.x, dz = boat.z - q.z, d = Math.hypot(dx, dz), min = BOAT_R + w.th;
@@ -1104,6 +1369,13 @@ function collideBoat() {
   }
   // les pointes : on crève !
   if (invuln <= 0) {
+    if (spikeWalls.length) {
+      const ci = courseInfo(boat.x, boat.z), ln = leftN(segT[ci.seg]);
+      const lat = (boat.x - ci.qx) * ln.x + (boat.z - ci.qz) * ln.z, hw = halfWidthAt(ci.s);
+      for (const w of spikeWalls) {
+        if (ci.s >= w.s0 - 1 && ci.s <= w.s1 + 1 && lat * w.side > 0 && hw - Math.abs(lat) < BOAT_R + SPIKE_DEPTH) deadlyHit = true;
+      }
+    }
     for (const m of movers) {
       const q = closestOnSeg(boat.x, boat.z, m.a, m.b);
       if (Math.hypot(boat.x - q.x, boat.z - q.z) < BOAT_R + m.th) deadlyHit = true;
@@ -1163,12 +1435,14 @@ function simulate(dt) {
   boat.vx += t.x * push * dt; boat.vz += t.z * push * dt;
 
   // tourbillon
-  const wdx = whirl.x - boat.x, wdz = whirl.z - boat.z, wd = Math.hypot(wdx, wdz);
-  if (wd < whirl.r + 1) {
-    const k = 1 - wd / (whirl.r + 1);
-    boat.vx += (wdx / wd * 3.5 + wdz / wd * 6) * k * dt;
-    boat.vz += (wdz / wd * 3.5 - wdx / wd * 6) * k * dt;
-    boat.w += 3.2 * k * dt;
+  for (const whirl of whirls) {
+    const wdx = whirl.x - boat.x, wdz = whirl.z - boat.z, wd = Math.hypot(wdx, wdz);
+    if (wd < whirl.r + 1 && wd > 1e-3) {
+      const k = 1 - wd / (whirl.r + 1);
+      boat.vx += (wdx / wd * 3.5 + wdz / wd * 6) * k * dt;
+      boat.vz += (wdz / wd * 3.5 - wdx / wd * 6) * k * dt;
+      boat.w += 3.2 * k * dt;
+    }
   }
 
   // intégration
@@ -1192,13 +1466,13 @@ function simulate(dt) {
   // points de passage
   for (let i = cpIndex + 1; i < checkpoints.length; i++) {
     const cp = checkpoints[i];
-    if (Math.hypot(boat.x - cp.x, boat.z - cp.z) < WID[cp.i] / 2 + 1.5) {
+    if (Math.hypot(boat.x - cp.x, boat.z - cp.z) < halfWidthAt(cp.s) + 1.5) {
       cpIndex = i; setCheckpointColors();
       sfxCheck(); toast('Point de passage !');
     }
   }
   // arrivée
-  if (boat.z < FINISH_Z) { state = 'win'; showWin(); }
+  if (courseInfo(boat.x, boat.z).s >= FINISH_S) { state = 'win'; showWin(); }
   runTime += dt;
 }
 let bonkCd = 0;
@@ -1262,6 +1536,7 @@ function showLobby() {
   $('startBtn').style.display = host ? '' : 'none';
   $('lobbyWait').style.display = host ? 'none' : '';
   $('lobbyInfo').textContent = host ? 'Donne ce code à tes amis pour qu\'ils montent sur ton radeau :' : 'Tu es dans la partie :';
+  $('lobbyMap').textContent = 'Map : ' + MAP.emoji + ' ' + MAP.name;
   renderLobby(true);
 }
 let lobbyHtml = '';
@@ -1297,7 +1572,7 @@ function hostGame() {
   net.myId = 'host'; net.role = 'host'; net.code = genCode();
   const peer = new Peer(PEER_PREFIX + net.code);
   net.peer = peer;
-  peer.on('open', () => { menuMsg(''); resetGame(); showLobby(); });
+  peer.on('open', () => { menuMsg(''); if (mapId !== selectedMap) buildMap(selectedMap); resetGame(); showLobby(); });
   peer.on('error', err => {
     if (err.type === 'unavailable-id' && net.peer === peer) { try { peer.destroy(); } catch (_) {} hostGame(); return; }
     if (err.type === 'peer-unavailable') return;
@@ -1326,7 +1601,7 @@ function hostReceive(conn, d) {
     const name = String(d.name || 'Rameur').slice(0, 12);
     addCrew(conn.peer, name, slot, false);
     net.conns.set(conn.peer, conn);
-    conn.send({ t: 'welcome', id: conn.peer, slot, code: net.code });
+    conn.send({ t: 'welcome', id: conn.peer, slot, code: net.code, mp: mapId });
     toast(`${name} monte sur le radeau !`, 1600);
     return;
   }
@@ -1339,7 +1614,7 @@ function hostReceive(conn, d) {
 function broadcastState() {
   const r = v => Math.round(v * 1000) / 1000;
   broadcast({
-    t: 'st', s: state, tm: r(time), rt: r(runTime), cp: cpIndex, dz: deaths,
+    t: 'st', s: state, mp: mapId, tm: r(time), rt: r(runTime), cp: cpIndex, dz: deaths,
     b: [boat.x, boat.z, boat.vx, boat.vz, boat.psi, boat.w].map(r),
     c: crew.map(m => [m.id, m.name, m.slot, r(m.alpha), r(m.dirYaw), m.farting ? 1 : 0, r(m.gauge), m.empty ? 1 : 0]),
   });
@@ -1371,6 +1646,7 @@ function clientReceive(d) {
   if (!d || typeof d !== 'object') return;
   if (d.t === 'welcome') {
     net.joined = true; net.myId = d.id;
+    if (d.mp && d.mp !== mapId) buildMap(d.mp);
     for (const m of [...crew]) removeCrew(m.id);
     me = addCrew(d.id, myName(), d.slot, true);
     menuMsg('');
@@ -1388,6 +1664,7 @@ function clientReceive(d) {
   }
 }
 function applyState(d) {
+  if (d.mp && d.mp !== mapId) { buildMap(d.mp); cpIndex = -2; net.snap = true; if (state === 'lobby') showLobby(); }
   const ids = new Set(d.c.map(e => e[0]));
   for (const m of [...crew]) if (!ids.has(m.id)) removeCrew(m.id);
   for (const [id, name, slot, a, f, farting, gauge, empty] of d.c) {
@@ -1441,7 +1718,18 @@ function netTick(dt) {
 }
 
 // Boutons
-function startSolo() { audio(); $('menu').classList.add('hidden'); resetGame(); state = 'play'; toast('Bonne descente !'); }
+function startSolo() { audio(); if (mapId !== selectedMap) buildMap(selectedMap); $('menu').classList.add('hidden'); resetGame(); state = 'play'; toast('Bonne descente !'); }
+// choix de la map dans le menu (la map s'affiche tout de suite derrière le menu)
+let selectedMap = 'vallee';
+try { const m = localStorage.getItem('proutours-map'); if (MAPS[m]) selectedMap = m; } catch (_) {}
+function selectMap(id) {
+  selectedMap = id;
+  document.querySelectorAll('.mapBtn').forEach(b => b.classList.toggle('sel', b.dataset.map === id));
+  try { localStorage.setItem('proutours-map', id); } catch (_) {}
+  if (mapId !== id) { buildMap(id); resetGame(); }
+}
+document.querySelectorAll('.mapBtn').forEach(b => b.addEventListener('click', () => selectMap(b.dataset.map)));
+selectMap(selectedMap);
 function saveName() { try { localStorage.setItem('proutours-name', $('nameInput').value); } catch (_) {} me.name = myName(); }
 $('playBtn').addEventListener('click', () => { saveName(); startSolo(); });
 $('hostBtn').addEventListener('click', () => { audio(); saveName(); hostGame(); });
@@ -1619,7 +1907,7 @@ function frame() {
     const sc = f.r * (1 + Math.sin(time * 2 + f.ph) * 0.06); f.f.scale.setScalar(sc);
     if (f.follow) { f.f.position.x = f.follow.x; f.f.position.z = f.follow.z; }
   }
-  whirl.mesh.rotation.z = time * 1.6;
+  for (const w of whirls) w.mesh.rotation.z = time * 1.6;
   for (const cp of checkpoints) cp.buoys.forEach((b, j) => { b.g.position.y = b.y + 0.2 + Math.sin(time * 2 + j + cp.i) * 0.1; b.g.rotation.z = Math.sin(time * 1.5 + cp.i) * 0.12; });
 
   if (bubbleLife > 0) {
@@ -1652,7 +1940,8 @@ try {
 
 window.__game = {
   boat, crew, get me() { return me; }, net, checkpoints, keys, get state() { return state; }, get deaths() { return deaths; }, respawn,
-  setCp: i => { cpIndex = i; placeAtCheckpoint(); }, courseInfo, pointAtS, circles, balls, movers, segT, riverH,
+  setCp: i => { cpIndex = i; placeAtCheckpoint(); }, courseInfo, pointAtS, circles, balls, movers, riverH, buildMap,
+  get segT() { return segT; }, get mapId() { return mapId; }, get finishS() { return FINISH_S; }, halfWidthAt,
   // pas de simulation sans affichage (pour les tests automatiques)
   tick: dt => { step(dt); animateCrew(dt, time); },
 };
