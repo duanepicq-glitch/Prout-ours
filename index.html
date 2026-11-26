@@ -437,7 +437,8 @@ const foams = [];        // ronds d'écume autour des obstacles
 const checkpoints = [];  // points de passage
 const whirls = [];       // tourbillons
 const spikeWalls = [];   // berges à pointes (mortelles)
-const holes = [];        // trous dans l'eau (on tombe dedans !)
+const holes = [];        // vrais trous dans la rivière (on tombe dans le vide !)
+let holeZone = null;     // [début, fin] du passage aux trous (le seul endroit avec du courant)
 let flowTable = [];
 const leftN = t => ({ x: t.z, z: -t.x });
 
@@ -534,6 +535,10 @@ function sideOf(x, z) {
 }
 function terrainAt(x, z) {
   const t = terrainBase(x, z);
+  // sous un trou : le vide (le terrain plonge très bas)
+  for (const h of holes) {
+    if (Math.hypot(x - h.x, z - h.z) < h.r + 0.5) { t.y = h.y - 34; t.void = 1; return t; }
+  }
   if (MAP.voids && MAP.voids.length && t.e > 0.1) {
     const so = sideOf(x, z), vf = t.pool ? 0 : voidAt(so.ci.s, so.side);
     if (vf > 0) {
@@ -598,6 +603,7 @@ const waterMat = new THREE.ShaderMaterial({
   fog: true,
   uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
     t: { value: 0 }, deep: { value: new THREE.Color(0x1b6a86) }, shallow: { value: new THREE.Color(0x3a9db0) },
+    holeN: { value: 0 }, holeD: { value: Array.from({ length: 16 }, () => new THREE.Vector3()) },
   }]),
   vertexShader: `
     attribute float aF; attribute float aU; attribute float aFoam;
@@ -611,10 +617,12 @@ const waterMat = new THREE.ShaderMaterial({
       #include <fog_vertex>
     }`,
   fragmentShader: `
-    uniform float t; uniform vec3 deep; uniform vec3 shallow;
+    uniform float t; uniform vec3 deep; uniform vec3 shallow; uniform int holeN; uniform vec3 holeD[16];
     varying vec2 vP; varying float vF; varying float vU; varying float vFoam;
     #include <fog_pars_fragment>
     void main(){
+      // les vrais trous : pas d'eau du tout à cet endroit (on voit le vide)
+      for (int i = 0; i < 16; i++) { if (i >= holeN) break; if (distance(vP, holeD[i].xy) < holeD[i].z) discard; }
       float flow = vF - t * 2.2;
       float n = sin(vP.x*0.21 + t*0.7) * sin(vP.y*0.17 - t*0.5) + 0.5*sin((vP.x - vP.y)*0.11 + t*0.9);
       vec3 col = mix(deep, shallow, smoothstep(-0.8, 1.2, n));
@@ -632,6 +640,7 @@ const waterMat = new THREE.ShaderMaterial({
 const poolMat = waterMat.clone();
 poolMat.uniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { deep: { value: new THREE.Color() }, shallow: { value: new THREE.Color() } }]);
 poolMat.uniforms.t = waterMat.uniforms.t;
+poolMat.uniforms.holeN = { value: 0 }; poolMat.uniforms.holeD = waterMat.uniforms.holeD;
 poolMat.polygonOffset = true; poolMat.polygonOffsetFactor = 2; poolMat.polygonOffsetUnits = 2;
 
 const foamGeo = new THREE.TorusGeometry(1, 0.12, 6, 24);
@@ -948,31 +957,39 @@ function ringSpinner(s, R = 7, gapDeg = 100, speed = 0.4) {
   for (const arc of local) for (let i = 0; i < arc.length - 1; i++) segs.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 } });
   movers.push({ kind: 'spin', cx: p.x, cz: p.z, local, segs, w: speed, phase: (s * 1.37) % 6.28, th: 0.8, group: g });
 }
-// Trous dans l'eau : un tourbillon noir qui avale le radeau si son milieu passe dessus
-let holeTex = null;
-function makeHoles() {
+// Vrais trous dans la rivière : l'eau est découpée et on voit le vide en dessous.
+// 1) on calcule leur position (avant le terrain, qui doit se creuser à ces endroits)
+function computeHoles() {
   const list = MAP.holes || [];
+  holeZone = null; waterMat.uniforms.holeN.value = 0;
   if (!list.length) return;
-  if (!holeTex) {
-    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
-    const ctx = cv.getContext('2d');
-    const grd = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    grd.addColorStop(0, 'rgba(0,0,0,1)'); grd.addColorStop(0.55, 'rgba(5,20,30,1)'); grd.addColorStop(0.8, 'rgba(10,60,80,0.9)'); grd.addColorStop(1, 'rgba(20,110,130,0)');
-    ctx.fillStyle = grd; ctx.fillRect(0, 0, 128, 128);
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 3;
-    for (let k = 0; k < 3; k++) { ctx.beginPath(); for (let i = 0; i < 60; i++) { const tt = i / 60, a = k * 2.1 + tt * 5, rr = 20 + tt * 38; i ? ctx.lineTo(64 + Math.cos(a) * rr, 64 + Math.sin(a) * rr) : ctx.moveTo(64 + Math.cos(a) * rr, 64 + Math.sin(a) * rr); } ctx.stroke(); }
-    holeTex = new THREE.CanvasTexture(cv); holeTex.colorSpace = THREE.SRGBColorSpace;
-  }
   let sMin = Infinity, sMax = -Infinity;
   for (const [s, lat, r] of list) {
     const p = riverPoint(s, lat);
-    const disc = new THREE.Mesh(new THREE.CircleGeometry(r * 1.35, 32), new THREE.MeshBasicMaterial({ map: holeTex, transparent: true, depthWrite: false }));
-    disc.rotation.x = -Math.PI / 2; disc.position.set(p.x, p.y + 0.04, p.z); world.add(disc);
-    foamRing(p.x, p.y, p.z, r * 1.05);
-    holes.push({ x: p.x, z: p.z, r, mesh: disc });
+    holes.push({ x: p.x, z: p.z, y: p.y, r, s });
     sMin = Math.min(sMin, s - r); sMax = Math.max(sMax, s + r);
   }
-  obsRange(sMin - 4, sMax + 4);   // tout le bassin aux trous compte comme un seul obstacle
+  holeZone = [sMin - 10, sMax + 6];
+}
+// 2) on construit ce qui se voit : les parois du puits qui descend dans le vide + un rebord
+function makeHoles() {
+  if (!holes.length) return;
+  const wallM = new THREE.MeshToonMaterial({ color: 0x1f8696, gradientMap: gradTex, side: THREE.DoubleSide });
+  const deepM = new THREE.MeshToonMaterial({ color: 0x0d3c46, gradientMap: gradTex, side: THREE.DoubleSide });
+  const rimM = toon(0x9fe6ee);
+  for (const h of holes) {
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(h.r, h.r, 3, 28, 1, true), wallM);
+    top.position.set(h.x, h.y - 1.5 + 0.02, h.z); world.add(top);
+    const deep = new THREE.Mesh(new THREE.CylinderGeometry(h.r, h.r * 0.9, 30, 28, 1, true), deepM);
+    deep.position.set(h.x, h.y - 18, h.z); world.add(deep);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(h.r, 0.13, 6, 32), rimM);
+    rim.rotation.x = -Math.PI / 2; rim.position.set(h.x, h.y + 0.05, h.z); world.add(rim);
+    h.mesh = rim;
+  }
+  obsRange(holeZone[0] + 6, holeZone[1] - 2);   // tout le passage aux trous compte comme un seul obstacle
+  // l'eau est découpée à ces endroits (dans le shader)
+  waterMat.uniforms.holeN.value = Math.min(16, holes.length);
+  holes.slice(0, 16).forEach((h, i) => waterMat.uniforms.holeD.value[i].set(h.x, h.z, h.r));
 }
 // Bords du toboggan au-dessus du vide (côté de la rivière qui descend dans le gouffre)
 function voidEdges() {
@@ -1120,16 +1137,16 @@ const MAPS = {
   },
   canyon: {
     name: 'Le Canyon', emoji: '🏜️',
-    // parcours avec des virages violents (presque à angle droit) et étroits
-    pts: [[0, 10], [0, -22], [-14, -36], [-14, -58], [8, -56], [8, -82], [8, -118], [-12, -120], [-12, -142], [2, -164], [0, -196]],
-    wid: [11, 11, 11, 10, 10, 11, 10, 10, 11, 11, 11],   // rivière très étroite, encore plus dans les virages
-    bulges: [{ s: 140, w: 26, len: 20 }, { s: 234, w: 19, len: 12 }],   // le grand bassin aux trous + l'hélice
-    voids: [{ s0: 30, s1: 46, side: 0 }, { s0: 161, s1: 176, side: 0 }, { s0: 204, s1: 222, side: 0 }],   // toboggans au-dessus du vide
-    holes: [[128, -2, 2.0], [133, 5, 2.2], [138, -6, 2.0], [140, 1.5, 2.0], [146, 7, 2.0], [147, -3, 2.2], [153, 3, 2.0]],   // [distance, côté, rayon] : un slalom entre les trous
-    hkeys: [[0, 0], [50, 0], [62, -4], [158, -4], [172, -9], [224, -9], [240, -14], [400, -14]],
-    pools: [{ x: 0, z: 10, r: 15 }, { x: 0, z: -208, r: 14 }],
-    spawnS: 0, startArchS: 22, finishS: 254,
-    grid: [-115, 100, -290, 75],
+    // parcours long : virages violents, une grande ligne droite, un grand passage aux trous
+    pts: [[0, 10], [0, -25], [-14, -39], [-14, -61], [8, -59], [8, -85], [8, -160], [-14, -174], [-14, -200], [-14, -230], [6, -232], [6, -256], [-6, -276], [-6, -320]],
+    wid: [11, 11, 11, 10, 10, 19, 19, 11, 13, 13, 10, 10, 11, 11],   // étroite, sauf la grande ligne droite
+    bulges: [{ s: 256, w: 34, len: 28 }, { s: 345, w: 19, len: 12 }],   // le grand passage aux trous + l'hélice
+    voids: [{ s0: 32, s1: 50, side: 0 }, { s0: 305, s1: 324, side: 0 }],   // toboggans au-dessus du vide
+    holes: [[242, 0, 3.0], [250, -9, 3.2], [251, 8, 3.2], [258, 1.5, 4.0], [266, -8, 3.0], [267, 9, 3.2], [274, 0, 3.0]],   // [distance, côté, rayon]
+    hkeys: [[0, 0], [52, 0], [64, -4], [106, -4], [118, -8], [326, -8], [340, -13], [600, -13]],
+    pools: [{ x: 0, z: 10, r: 15 }, { x: -6, z: -332, r: 14 }],
+    spawnS: 0, startArchS: 20, finishS: 389, res: 0.9,
+    grid: [-100, 95, -420, 75],
     theme: {
       relief: 'canyon', sky: [0x3aa0f0, 0xd6ecf7, 0xf2e8d8], fog: 0xe8e4da, ground: 0xc49a6a, sun: 0xfff0d0,
       water: [0x0f9fbe, 0x4fd6e6], bed: 0x3c8f86, sand: 0xf0d59c, shore: 0xe6c690, scrub: 0x9db85a,
@@ -1140,21 +1157,30 @@ const MAPS = {
       rockXZ(11, 16, 1.6, 0x77736e); rockXZ(-10, 18, 1.4, 0x77736e); rockXZ(-10.5, 3, 1.2, 0x77736e);
       // (côté : 1 = gauche, -1 = droite, 0 = les deux)
       spikeWall(14, 24, -1);                 // berge à pointes
-      ringSpinner(38);                       // anneau à pointes au-dessus du vide
-      spikeWall(54, 64, 1);
-      spikeWall(68, 80, 1);                  // 1er virage violent : pointes à l'extérieur
-      spikeWall(90, 102, -1);                // 2e virage violent
-      // (le grand bassin aux trous est construit à part, voir "holes")
-      spikeWall(180, 192, 1);                // virage violent après la cascade au-dessus du vide
-      ringSpinner(213, 7, 100, 0.42);        // anneau au-dessus du vide
-      spinner(234, 2, 4.3, -0.6);            // hélice dans le dernier rapide
-      spikeWall(244, 252, -1);
-      spikeWall(246, 252, 1);                // dernier couloir
+      ringSpinner(41);                       // anneau à pointes au-dessus du vide
+      spikeWall(70, 82, 1);                  // 1er virage violent : pointes à l'extérieur
+      spikeWall(93, 105, -1);                // 2e virage violent
+      // la grande ligne droite : quelques pointes sur les bords, 2 croix qui pivotent, des rochers le long des berges
+      spikeWall(125, 133, 1);
+      rockAt(138, -8.6, 1.3);
+      spinner(145, 4, 3.2, 0.35, 0);         // croix à pointes qui pivote
+      spikeWall(152, 160, -1);
+      rockAt(155, 8.6, 1.2);
+      spinner(168, 4, 3.2, -0.35, 0);        // 2e croix, dans l'autre sens
+      rockAt(176, -8.6, 1.4);
+      spikeWall(180, 188, 1);
+      rockAt(193, 8.6, 1.2);
+      // (le grand passage aux trous est construit à part, voir "holes")
+      spikeWall(284, 296, 1);                // virage violent après les trous
+      ringSpinner(315, 7, 100, 0.42);        // anneau au-dessus du vide
+      spinner(345, 2, 4.3, -0.6);            // hélice après la descente
+      spikeWall(366, 380, -1);
+      spikeWall(369, 378, 1);                // dernier couloir
       // rochers sur le bord du bassin d'arrivée
-      rockXZ(9, -216, 1.5, 0x77736e); rockXZ(-10, -212, 1.3, 0x77736e);
+      rockXZ(3, -340, 1.5, 0x77736e); rockXZ(-16, -336, 1.3, 0x77736e);
     },
     decor() {
-      scatter(170, 3000, [-90, 75, -270, 60], (x, y, z, e) => {
+      scatter(230, 4200, [-90, 75, -400, 60], (x, y, z, e) => {
         if (e > 1.6 && e < 7.5) {
           const r = Math.random();
           if (r < 0.5) palm(x, y, z, rand(0.9, 1.3));
@@ -1169,7 +1195,7 @@ const MAPS = {
         }
         return false;
       });
-      scatter(90, 2500, [-60, 50, -250, 40], (x, y, z, e) => { if (e < 0.4 || e > 1.6) return false; reeds(x, y, z, rand(0.8, 1.2)); return true; });
+      scatter(120, 3500, [-60, 50, -380, 40], (x, y, z, e) => { if (e < 0.4 || e > 1.6) return false; reeds(x, y, z, rand(0.8, 1.2)); return true; });
       // plateaux lointains
       for (let i = 0; i < 18; i++) {
         const a = i / 18 * Math.PI * 2 + rand(-0.1, 0.1), d = rand(200, 260), h = rand(30, 55), w = rand(40, 70);
@@ -1233,9 +1259,11 @@ function buildMap(id) {
   hemi.groundColor.setHex(th.ground); sun.color.setHex(th.sun);
   for (const m of [waterMat, poolMat]) { m.uniforms.deep.value.setHex(th.water[0]); m.uniforms.shallow.value.setHex(th.water[1]); }
 
+  // les trous (avant le terrain : il doit se creuser dessous)
+  computeHoles();
   // le terrain
   {
-    const [X0, X1, Z0, Z1] = MAP.grid, RES = 0.8;
+    const [X0, X1, Z0, Z1] = MAP.grid, RES = MAP.res || 0.8;
     const nx = Math.round((X1 - X0) / RES) + 1, nz = Math.round((Z1 - Z0) / RES) + 1;
     const pos = new Float32Array(nx * nz * 3), col = new Float32Array(nx * nz * 3);
     for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
@@ -1353,7 +1381,7 @@ const boat = { x: 0, z: 4, y: 0, vx: 0, vz: 0, psi: 0, w: 0, tiltX: 0, tiltZ: 0 
 const MASS = 1, INERTIA = 3.2;
 const THRUST = 7.5, BURST = 1.6;
 const LIN_DRAG = 0.65, ANG_DRAG = 1.8, MAX_SPEED = 13;
-const SLOPE_G = 9, CURRENT = 0.5;
+const HOLE_CURRENT = 1.6;   // courant seulement dans le passage aux trous
 
 // =============================================================== LES PETITS BONSHOMMES
 const VESTS = [0xffd23f, 0x2f8fe0, 0x3fae4a, 0xb44ad6];
@@ -1821,20 +1849,28 @@ function simulate(dt) {
     if (m !== me && m.netAlpha != null) m.alpha = angleLerp(m.alpha, m.netAlpha, 1 - Math.exp(-12 * dt));
     if (m.wantFart && m.gauge > 0 && !m.empty) {
       m.farting = true;
-      m.gauge = Math.max(0, m.gauge - dt * 0.38);
+      m.gauge = Math.max(0, m.gauge - dt * 0.28);
       if (m.gauge <= 0) { m.empty = true; if (m === me) toast('Plus de gaz !', 800); }
+      // plus on reste appuyé, plus ça pousse (de 55 % au début jusqu'à 200 % après ~2,5 s)
+      m.holdT = (m.holdT || 0) + dt;
+      const power = 0.55 + Math.min(1.45, m.holdT * 0.6);
       const s = seatLocal(m.alpha), r = toWorldDir(s.x, s.z, boat.psi), d = thrustDir(m);
-      applyImpulse(r.x, r.z, d.x * THRUST * dt, d.z * THRUST * dt);
+      applyImpulse(r.x, r.z, d.x * THRUST * power * dt, d.z * THRUST * power * dt);
     } else {
-      m.farting = false;
+      m.farting = false; m.holdT = 0;
       if (!m.wantFart || m.empty) m.gauge = Math.min(1, m.gauge + dt * (m.empty ? 0.35 : 0.5));
       if (m.empty && m.gauge > 0.35) m.empty = false;
     }
   }
-  // pente (ça accélère dans les descentes, ça freine dans les montées) + courant
-  const ci = courseInfo(boat.x, boat.z), t = segT[ci.seg], slope = riverSlope(ci.s);
-  const push = -slope * SLOPE_G + CURRENT;
-  boat.vx += t.x * push * dt; boat.vz += t.z * push * dt;
+  // pas de courant… sauf dans le passage aux trous : là, le courant entraîne le radeau vers les trous
+  const ci = courseInfo(boat.x, boat.z), t = segT[ci.seg];
+  if (holeZone && ci.s > holeZone[0] && ci.s < holeZone[1]) {
+    boat.vx += t.x * HOLE_CURRENT * dt; boat.vz += t.z * HOLE_CURRENT * dt;
+    for (const h of holes) {
+      const dx = h.x - boat.x, dz = h.z - boat.z, d = Math.hypot(dx, dz);
+      if (d < h.r * 2.2 && d > 0.01) { const k = (1 - d / (h.r * 2.2)) * 3.0; boat.vx += dx / d * k * dt; boat.vz += dz / d * k * dt; }
+    }
+  }
 
   // tourbillon
   for (const whirl of whirls) {
@@ -1864,7 +1900,7 @@ function simulate(dt) {
   if (deadlyHit) { deadlyHit = false; pop(); return; }
   // trous dans l'eau : si le milieu du radeau passe au-dessus, il est avalé
   for (const h of holes) {
-    if (Math.hypot(boat.x - h.x, boat.z - h.z) < h.r + 0.8) { startFall(h); return; }
+    if (Math.hypot(boat.x - h.x, boat.z - h.z) < h.r + 0.2) { startFall(h); return; }
   }
   // …et si le radeau dépasse trop du bord, il tombe dans le vide !
   if (MAP.voids && MAP.voids.length) {
