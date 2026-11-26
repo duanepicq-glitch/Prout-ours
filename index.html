@@ -264,6 +264,7 @@ function audio() {
   if (!actx) {
     actx = new (window.AudioContext || window.webkitAudioContext)();
     master = actx.createGain(); master.gain.value = settings.volume / 100; master.connect(actx.destination);
+    setTimeout(ensureFartBank, 0);   // prépare les prouts à l'avance
   }
   if (actx.state === 'suspended') actx.resume();
   return actx;
@@ -277,43 +278,81 @@ function noise(a) {
   }
   const s = a.createBufferSource(); s.buffer = noiseBuf; return s;
 }
-let fartNodes = null;
-function startFartLoop() {
-  if (!actx || muted || fartNodes) return;
-  const a = actx, t = a.currentTime, base = rand(60, 105);
-  const osc = a.createOscillator(); osc.type = 'sawtooth';
-  osc.frequency.setValueAtTime(base * 1.4, t);
-  osc.frequency.exponentialRampToValueAtTime(base, t + 0.12);
-  const lfo = a.createOscillator(); lfo.type = 'square'; lfo.frequency.value = rand(16, 30);
-  const lg = a.createGain(); lg.gain.value = 0.45;
-  const amp = a.createGain(); amp.gain.value = 0.55;
-  lfo.connect(lg).connect(amp.gain);
-  const filt = a.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = rand(550, 850); filt.Q.value = 5;
-  const env = a.createGain();
-  env.gain.setValueAtTime(0.0001, t); env.gain.exponentialRampToValueAtTime(0.85, t + 0.03);
-  osc.connect(amp).connect(filt).connect(env).connect(master);
-  const n = noise(a); n.loop = true;
-  const nf = a.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 260; nf.Q.value = 1.2;
-  const ng = a.createGain(); ng.gain.value = 0.35;
-  n.connect(nf).connect(ng).connect(env);
-  osc.start(t); lfo.start(t); n.start(t);
-  fartNodes = { osc, lfo, n, env, base };
+// ---- Les bruits de prouts : fabriqués échantillon par échantillon pour sonner "vrai" (et rigolo)
+// Chaque type a son caractère : gros "braaap", qui couine, qui crachote, mouillé, très long, petit "pfft".
+const FART_TYPES = {
+  brap:    { f: [60, 85],   dur: [0.7, 1.2],  duty: 0.28, cut: 560,  q: 6, wet: 0.22, gate: 0,    drop: 0.4,  vib: 0.15 },
+  squeak:  { f: [190, 290], dur: [0.45, 0.8], duty: 0.12, cut: 1700, q: 9, wet: 0.05, gate: 0,    drop: -0.1, vib: 0.22 },
+  sputter: { f: [75, 110],  dur: [0.8, 1.3],  duty: 0.3,  cut: 680,  q: 5, wet: 0.45, gate: 0.85, drop: 0.3,  vib: 0.1 },
+  wet:     { f: [48, 68],   dur: [0.7, 1.1],  duty: 0.36, cut: 400,  q: 4, wet: 0.85, gate: 0.35, drop: 0.35, vib: 0.1 },
+  long:    { f: [56, 72],   dur: [1.6, 2.3],  duty: 0.25, cut: 500,  q: 7, wet: 0.2,  gate: 0,    drop: 0.45, vib: 0.2 },
+  tiny:    { f: [110, 160], dur: [0.18, 0.3], duty: 0.2,  cut: 900,  q: 3, wet: 0.9,  gate: 0,    drop: 0.3,  vib: 0 },
+};
+const FART_MIX = ['brap', 'brap', 'brap', 'sputter', 'sputter', 'wet', 'wet', 'squeak', 'squeak', 'long'];
+let fartBank = null;
+function synthFart(type) {
+  const P = FART_TYPES[type], sr = actx.sampleRate;
+  const dur = rand(P.dur[0], P.dur[1]), n = Math.floor(dur * sr);
+  const buf = actx.createBuffer(1, n, sr), d = buf.getChannelData(0);
+  const f0 = rand(P.f[0], P.f[1]), vibF = rand(3, 7), vibP = rand(0, 6), cutWob = rand(15, 30);
+  let ph = 0, jit = 0, low = 0, band = 0, gateOn = true, gateT = 0, peak = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / sr, u = t / dur;
+    // hauteur qui tremble un peu et descend à la fin ("pfrrrouuu")
+    jit = (jit + (Math.random() - 0.5) * 0.03) * 0.995;
+    let f = f0 * (1 - P.drop * u) * (1 + P.vib * Math.sin(6.283 * vibF * t + vibP)) * (1 + jit);
+    if (type === 'squeak') f *= 1 + 0.55 * Math.sin(Math.PI * u);
+    ph += f / sr; if (ph >= 1) ph -= 1;
+    // impulsions "flap-flap" (comme l'air qui fait vibrer)
+    let x = ph < P.duty ? 1 : -P.duty / (1 - P.duty);
+    // côté mouillé : du bruit collé aux impulsions
+    x += P.wet * (Math.random() * 2 - 1) * (ph < P.duty * 1.6 ? 1 : 0.25);
+    // ça crachote : des petits trous
+    if (P.gate) {
+      gateT -= 1 / sr;
+      if (gateT <= 0) { gateOn = Math.random() < (gateOn ? 0.78 : 0.55); gateT = rand(0.02, 0.08); }
+      if (!gateOn) x *= 0.04;
+    }
+    // filtre qui résonne (le "corps" du prout)
+    const cut = Math.min(P.cut * (1 - 0.3 * u) * (1 + 0.18 * Math.sin(t * cutWob)), sr / 6);
+    const F = 2 * Math.sin(Math.PI * cut / sr), Q = 1 / P.q;
+    low += F * band; const high = x - low - Q * band; band += F * high;
+    let y = low * 0.9 + band * 0.3;
+    const env = Math.min(1, t / 0.012) * Math.min(1, (dur - t) / (dur * 0.18)) * (0.82 + 0.18 * Math.sin(t * 9));
+    y = Math.tanh(y * 1.9) * env;
+    d[i] = y; peak = Math.max(peak, Math.abs(y));
+  }
+  const g = 0.9 / (peak || 1);
+  for (let i = 0; i < n; i++) d[i] *= g;
+  return buf;
 }
-function wobbleFartLoop(time) {
-  if (!fartNodes) return;
-  const f = fartNodes, now = actx.currentTime;
-  f.osc.frequency.setTargetAtTime(f.base * (0.85 + 0.25 * Math.sin(time * 6.3) + rand(-0.08, 0.08)), now, 0.04);
-  f.lfo.frequency.setTargetAtTime(18 + 10 * Math.sin(time * 4.1) + rand(-3, 3), now, 0.05);
+function ensureFartBank() {
+  if (fartBank || !actx) return;
+  fartBank = {};
+  for (const type of Object.keys(FART_TYPES)) fartBank[type] = [synthFart(type), synthFart(type), synthFart(type)];
 }
-function stopFartLoop() {
-  if (!fartNodes) return;
-  const { osc, lfo, n, env, base } = fartNodes, t = actx.currentTime;
-  env.gain.cancelScheduledValues(t); env.gain.setValueAtTime(Math.max(env.gain.value, 0.001), t);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-  osc.frequency.cancelScheduledValues(t); osc.frequency.setValueAtTime(base, t); osc.frequency.exponentialRampToValueAtTime(base * 0.5, t + 0.18);
-  osc.stop(t + 0.2); lfo.stop(t + 0.2); n.stop(t + 0.2);
-  fartNodes = null;
+// joue un prout ; renvoie une "voix" qu'on peut arrêter
+function playFart(type, vol = 1) {
+  if (!actx || muted) return null;
+  ensureFartBank();
+  const list = fartBank[type || FART_MIX[Math.floor(Math.random() * FART_MIX.length)]];
+  const src = actx.createBufferSource(); src.buffer = list[Math.floor(Math.random() * list.length)];
+  src.playbackRate.value = rand(0.85, 1.18);
+  const g = actx.createGain(); g.gain.value = vol;
+  src.connect(g).connect(master); src.start();
+  const v = { src, g, done: false };
+  src.onended = () => { v.done = true; };
+  return v;
 }
+function stopVoice(v, tail = true) {
+  if (!v || v.done || !actx) return;
+  const now = actx.currentTime;
+  v.g.gain.setTargetAtTime(0, now, 0.035);
+  try { v.src.stop(now + 0.25); } catch (_) {}
+  v.done = true;
+  if (tail && Math.random() < 0.5) playFart('tiny', v.g.gain.value * 0.6);
+}
+function stopAllVoices() { for (const m of crew) { stopVoice(m.voice, false); m.voice = null; } }
 function tone(type, f1, f2, dur, vol = 0.25, delay = 0) {
   if (!actx || muted) return;
   const a = actx, t = a.currentTime + delay;
@@ -407,11 +446,12 @@ function waterRegion(x, z) {
   let e = ci.dist - halfWidthAt(ci.s);
   let nx = ci.dist > 1e-6 ? (ci.qx - x) / ci.dist : 0, nz = ci.dist > 1e-6 ? (ci.qz - z) / ci.dist : 0;
   if (ci.beyond > 0) e = Math.max(e, ci.beyond + 0.4);
+  let pool = false;
   for (const p of POOLS) {
     const d = Math.hypot(x - p.x, z - p.z), ep = d - p.r;
-    if (ep < e) { e = ep; nx = d > 1e-6 ? (p.x - x) / d : 0; nz = d > 1e-6 ? (p.z - z) / d : 0; }
+    if (ep < e) { e = ep; nx = d > 1e-6 ? (p.x - x) / d : 0; nz = d > 1e-6 ? (p.z - z) / d : 0; pool = true; }
   }
-  return { e, nx, nz, s: ci.s };
+  return { e, nx, nz, s: ci.s, pool };
 }
 function pointAtS(s) {
   s = clamp(s, 0, TOTAL);
@@ -436,7 +476,33 @@ function flowAt(s) { const f = clamp(s / 0.5, 0, flowTable.length - 1), i = Math
 
 // --------------------------------------------------------------- Relief selon le thème de la map
 function hills(x, z) { return 1.0 + Math.sin(x * 0.08) * Math.cos(z * 0.07) * 1.1 + Math.sin(x * 0.19 + z * 0.13) * 0.5; }
+// Zones de vide : la rivière devient un toboggan au-dessus d'un gouffre (side : 1 = gauche, -1 = droite, 0 = les deux)
+function voidAt(s, side) {
+  let f = 0;
+  for (const v of (MAP.voids || [])) if (v.side === 0 || v.side === side) f = Math.max(f, sm((s - v.s0) / 2) * sm((v.s1 - s) / 2));
+  return f;
+}
+function sideOf(x, z) {
+  const ci = courseInfo(x, z), ln = leftN(segT[ci.seg]);
+  const lat = (x - ci.qx) * ln.x + (z - ci.qz) * ln.z;
+  return { ci, lat, side: lat >= 0 ? 1 : -1 };
+}
 function terrainAt(x, z) {
+  const t = terrainBase(x, z);
+  if (MAP.voids && MAP.voids.length && t.e > 0.1) {
+    const so = sideOf(x, z), vf = t.pool ? 0 : voidAt(so.ci.s, so.side);
+    if (vf > 0) {
+      const base = riverH(so.ci.s), e = t.e;
+      // le gouffre : on tombe tout de suite, puis les falaises remontent loin du toboggan
+      const deep = base - 34 + Math.sin(x * 0.2) * Math.cos(z * 0.17) * 1.5;
+      let vy = e < 0.6 ? base - 0.3 + (deep - base + 0.3) * sm(e / 0.6) : deep;
+      if (e > 18) vy = deep + sm((e - 18) / 7) * (48 + hills(x, z));
+      t.y = t.y + (vy - t.y) * vf; t.void = vf;
+    }
+  }
+  return t;
+}
+function terrainBase(x, z) {
   const wr = waterRegion(x, z), e = wr.e, base = riverH(wr.s);
   let y;
   if (e < -0.6) y = -2;
@@ -450,11 +516,18 @@ function terrainAt(x, z) {
     if (e < 2.6) y = 0.35 + sm((e - 0.6) / 2) * 1.6;
     else y = 1.95 + (hills(x, z) - 0.2) * sm((e - 2.6) / 8) + Math.pow(Math.max(0, e - 24), 1.15) * 0.45;
   }
-  return { y: base + y, e };
+  return { y: base + y, e, pool: wr.pool };
 }
 const _c = new THREE.Color(), _cA = new THREE.Color();
-function terrainColor(x, z, y, e, base) {
+function terrainColor(x, z, y, e, base, vf = 0) {
   const th = MAP.theme;
+  if (vf > 0.5 && e > 0.2) {
+    // parois du gouffre en couches + fond sombre
+    const h = y - base;
+    if (h < -30) return _c.setHex(0x7a4a32);
+    const band = Math.sin(h * 0.9 + Math.sin(x * 0.05 + z * 0.04) * 1.5);
+    return _c.setHex(band > 0.35 ? th.cliff1 || 0xd8743f : band > -0.4 ? th.cliff2 || 0xeaa05a : th.cliff3 || 0xc25a38);
+  }
   if (e < -0.3) return _c.setHex(th.bed);
   if (e < 0.75) return _c.setHex(th.sand);
   const n = 0.5 + 0.5 * Math.sin(x * 0.31 + Math.sin(z * 0.2) * 2) * Math.sin(z * 0.27);
@@ -648,6 +721,7 @@ function addSpike(parent, x, y, z, dir) {
   s.castShadow = true; parent.add(s);
 }
 function spikeBall(s, lat, amp, speed) {
+  obsRange(s - 4.5, s + 4.5);
   const p = riverPoint(s, lat), ln = leftN(segT[courseInfo(p.x, p.z).seg]);
   const g = new THREE.Group(); world.add(g);
   const core = shadowed(new THREE.Mesh(new THREE.IcosahedronGeometry(0.9, 2), toon(0x3a3d42))); g.add(core); outline(core, 1.05);
@@ -662,6 +736,7 @@ function spikeBall(s, lat, amp, speed) {
   foamRing(p.x, p.y, p.z, 1.3, b);
 }
 function spikedLog(s, half, speed) {
+  obsRange(s - half - 4, s + half + 4);
   const p = riverPoint(s, 0);
   const g = new THREE.Group(); g.position.set(p.x, p.y + 0.4, p.z); world.add(g);
   const log = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, half * 2, 14), toon(0x7a5232)));
@@ -683,6 +758,7 @@ function spikedLog(s, half, speed) {
   movers.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 }, th: 1.0, kind: 'rot', cx: p.x, cz: p.z, half, w: speed, group: g });
 }
 function spikedGate(s, half, amp, speed, phase) {
+  obsRange(s - 4, s + 4);
   const p = riverPoint(s, 0), ln = leftN(segT[courseInfo(p.x, p.z).seg]);
   const g = new THREE.Group(); world.add(g);
   const bar = shadowed(new THREE.Mesh(new RoundedBoxGeometry(half * 2, 0.9, 0.8, 2, 0.25), toon(0x9c3b2c))); g.add(bar); outline(bar, 1.04);
@@ -696,6 +772,7 @@ function spikedGate(s, half, amp, speed, phase) {
   movers.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 }, th: 0.75, kind: 'slide', cx: p.x, cz: p.z, y: p.y, lx: ln.x, lz: ln.z, half, amp, speed, phase, mesh: g });
 }
 function whirlpool(x, z, r) {
+  { const ss = courseInfo(x, z).s; obsRange(ss - r - 2, ss + r + 2); }
   const w = { x, z, r, y: waterY(x, z) };
   const cv = document.createElement('canvas'); cv.width = cv.height = 256;
   const ctx = cv.getContext('2d');
@@ -744,6 +821,7 @@ function finishLine(s) {
 }
 // Hélice à pointes : des bras courbés qui tournent au-dessus de la rivière
 function spinner(s, nArms = 2, len = 4.3, speed = 0.6, bend = 0.8) {
+  obsRange(s - len - 3.6, s + len + 3.6);
   const p = riverPoint(s, 0);
   const g = new THREE.Group(); g.position.set(p.x, p.y + 0.55, p.z); world.add(g);
   const local = [];
@@ -782,10 +860,83 @@ function spinner(s, nArms = 2, len = 4.3, speed = 0.6, bend = 0.8) {
   for (const arm of local) for (let i = 0; i < arm.length - 1; i++) segs.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 } });
   movers.push({ kind: 'spin', cx: p.x, cz: p.z, local, segs, w: speed, phase: (s * 1.37) % 6.28, th: 0.75, group: g });
 }
+// Anneau à pointes : 2 demi-cercles qui tournent. On entre dans l'anneau par une ouverture,
+// on attend au milieu, et on ressort quand une ouverture regarde vers l'aval.
+function ringSpinner(s, R = 7, gapDeg = 100, speed = 0.4) {
+  obsRange(s - R - 3.6, s + R + 3.6);
+  const p = riverPoint(s, 0);
+  const g = new THREE.Group(); g.position.set(p.x, p.y + 0.5, p.z); world.add(g);
+  const gap = gapDeg * Math.PI / 180, span = Math.PI - gap, local = [];
+  const PIECES = 6;
+  for (let a = 0; a < 2; a++) {
+    const start = a * Math.PI + gap / 2, pts = [];
+    for (let k = 0; k <= 12; k++) { const phi = start + span * k / 12; pts.push([Math.cos(phi) * R, -Math.sin(phi) * R]); }
+    local.push(pts);
+    for (let k = 0; k < PIECES; k++) {
+      const a0 = start + span * k / PIECES, da = span / PIECES;
+      const holder = new THREE.Group(); holder.rotation.y = a0; g.add(holder);
+      const piece = shadowed(new THREE.Mesh(new THREE.TorusGeometry(R, 0.3, 8, 10, da), toon(k % 2 ? 0x2b2b2b : 0xf2c14e)));
+      piece.rotation.x = -Math.PI / 2; holder.add(piece);
+      // pointes vers l'intérieur, vers l'extérieur et vers le haut
+      for (const f of [0.25, 0.75]) {
+        const phi = a0 + da * f, cx = Math.cos(phi) * R, cz = -Math.sin(phi) * R, out = new V3(Math.cos(phi), 0, -Math.sin(phi));
+        addSpike(g, cx, 0, cz, out.clone());
+        addSpike(g, cx, 0, cz, out.clone().negate());
+        addSpike(g, cx, 0, cz, new V3(0, 1, 0));
+      }
+    }
+    // gros boulons au bout des demi-cercles
+    for (const phi of [start, start + span]) { const b = shadowed(new THREE.Mesh(sphereGeo, toon(0x2b2b2b))); b.scale.setScalar(0.42); b.position.set(Math.cos(phi) * R, 0, -Math.sin(phi) * R); g.add(b); }
+  }
+  // petit mât au centre qui tient l'anneau (au-dessus du radeau, pas d'obstacle)
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 8), toon(0x6f6d6a)); mast.position.set(0, 3.2, 0); g.add(mast);
+  for (let a = 0; a < 4; a++) {
+    const phi = a * Math.PI / 2 + gap / 2 + span / 2 * (a % 2 ? 0 : 1);
+    const ang = a * Math.PI / 2 + Math.PI / 4;
+    const cable = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, Math.hypot(R, 5.8), 5), toon(0x3a3a3a));
+    const mx = Math.cos(ang) * R / 2, mz = -Math.sin(ang) * R / 2;
+    cable.position.set(mx, 3.2, mz);
+    cable.quaternion.setFromUnitVectors(new V3(0, 1, 0), new V3(-Math.cos(ang) * R, 5.8, Math.sin(ang) * R).normalize());
+    g.add(cable);
+  }
+  const segs = [];
+  for (const arc of local) for (let i = 0; i < arc.length - 1; i++) segs.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 } });
+  movers.push({ kind: 'spin', cx: p.x, cz: p.z, local, segs, w: speed, phase: (s * 1.37) % 6.28, th: 0.8, group: g });
+}
+// Bords du toboggan au-dessus du vide (côté de la rivière qui descend dans le gouffre)
+function voidEdges() {
+  for (const v of (MAP.voids || [])) {
+    obsRange(v.s0, v.s1);
+    for (const side of (v.side === 0 ? [1, -1] : [v.side])) {
+      const pos = [], idx = [];
+      const N = Math.ceil((v.s1 - v.s0) / 0.8);
+      for (let k = 0; k <= N; k++) {
+        const s = v.s0 + (v.s1 - v.s0) * k / N, p = pointAtS(s), t = smoothTangent(s), ln = leftN(t), hw = halfWidthAt(s), y = riverH(s);
+        const ex = p.x + ln.x * side * hw, ez = p.z + ln.z * side * hw;
+        pos.push(ex, y + 0.06, ez, ex, y - 4, ez);
+        if (k < N) { const a = 2 * k; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setIndex(idx); geo.computeVertexNormals();
+      const wall = new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0x2a8fa8, gradientMap: gradTex, side: THREE.DoubleSide }));
+      world.add(wall);
+      // liseré clair sur le bord
+      const rp = [], ri = [];
+      for (let k = 0; k <= N; k++) {
+        const s = v.s0 + (v.s1 - v.s0) * k / N, p = pointAtS(s), t = smoothTangent(s), ln = leftN(t), hw = halfWidthAt(s), y = riverH(s) + 0.07;
+        rp.push(p.x + ln.x * side * (hw - 0.25), y, p.z + ln.z * side * (hw - 0.25), p.x + ln.x * side * (hw + 0.05), y, p.z + ln.z * side * (hw + 0.05));
+        if (k < N) { const a = 2 * k; ri.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
+      }
+      const rg = new THREE.BufferGeometry(); rg.setAttribute('position', new THREE.Float32BufferAttribute(rp, 3)); rg.setIndex(ri);
+      world.add(new THREE.Mesh(rg, new THREE.MeshBasicMaterial({ color: 0xbff3fa, side: THREE.DoubleSide })));
+    }
+  }
+}
 // Berge à pointes : une rangée de pointes le long d'un bord de la rivière (side : 1 = gauche, -1 = droite)
 const SPIKE_DEPTH = 0.9;
 const plankGeo = new THREE.BoxGeometry(0.95, 1.0, 0.3);
 function spikeWall(s0, s1, side) {
+  obsRange(s0 - 1, s1 + 1);
   spikeWalls.push({ s0, s1, side });
   const pts = [];
   for (let s = s0; s <= s1; s += 0.9) pts.push(s);
@@ -810,10 +961,25 @@ function spikeWall(s0, s1, side) {
   spikes.castShadow = planks.castShadow = true; planks.receiveShadow = true;
   world.add(planks, spikes);
 }
+// chaque obstacle note la portion de rivière qu'il occupe (pour placer les points de passage)
+const obstacleRanges = [];
+function obsRange(s0, s1) { obstacleRanges.push({ s0, s1 }); }
+// Un point de passage tous les 3 obstacles, dans un endroit calme entre deux obstacles
+function checkpointSpots() {
+  const obs = obstacleRanges.slice().sort((a, b) => a.s0 - b.s0), spots = [];
+  let count = 0, maxEnd = -Infinity;
+  for (let i = 0; i < obs.length; i++) {
+    count++; maxEnd = Math.max(maxEnd, obs[i].s1);
+    if (count < 3) continue;
+    const gapStart = maxEnd + 1, gapEnd = (i + 1 < obs.length ? obs[i + 1].s0 : FINISH_S - 6) - 1;
+    if (gapEnd - gapStart >= 1.5) { spots.push((gapStart + gapEnd) / 2); count = 0; }
+  }
+  return spots;
+}
 function makeCheckpoints() {
-  for (let i = MAP.cpEvery || 1; i < PTS.length - 1; i += MAP.cpEvery || 1) {
-    const s = segCum[i];
-    const cp = { i, s, x: PTS[i].x, z: PTS[i].z, buoys: [], active: false };
+  for (const s of checkpointSpots()) {
+    const pt = pointAtS(s);
+    const cp = { s, x: pt.x, z: pt.z, buoys: [], active: false };
     for (const sg of [1, -1]) {
       const p = riverPoint(s, sg * (halfWidthAt(s) - 1.3));
       const b = new THREE.Group();
@@ -833,6 +999,7 @@ function scatter(count, tries, area, place) {
   for (let n = 0; n < tries && placed < count; n++) {
     const x = rand(area[0], area[1]), z = rand(area[2], area[3]);
     const t = terrainAt(x, z);
+    if (t.void > 0.2) continue;          // rien dans le gouffre
     if (place(x, t.y, z, t.e)) placed++;
   }
 }
@@ -884,11 +1051,12 @@ const MAPS = {
     name: 'Le Canyon', emoji: '🏜️',
     // parcours sinueux : plein de virages, des berges à pointes à l'extérieur des virages
     pts: [[0, 10], [0, -20], [-12, -38], [-26, -50], [-30, -70], [-20, -90], [0, -100], [18, -112], [24, -132], [14, -152], [-2, -165], [-4, -185], [0, -200]],
-    wid: [13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13],   // rivière étroite
-    bulges: [{ s: 42, w: 19, len: 12 }, { s: 82, w: 19, len: 12 }, { s: 146, w: 15, len: 9 }, { s: 164, w: 19, len: 12 }, { s: 206, w: 19, len: 12 }],
+    wid: [11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11],   // rivière très étroite
+    bulges: [{ s: 80, w: 19, len: 12 }, { s: 166, w: 19, len: 12 }, { s: 218, w: 19, len: 12 }],
+    voids: [{ s0: 36, s1: 66, side: 0 }, { s0: 92, s1: 128, side: 0 }, { s0: 182, s1: 206, side: 0 }],   // toboggan au-dessus du vide
     hkeys: [[0, 0], [34, 0], [48, -4], [95, -4], [108, -9], [150, -9], [160, -7], [198, -7], [214, -12], [400, -12]],
     pools: [{ x: 0, z: 10, r: 15 }, { x: 0, z: -212, r: 14 }],
-    spawnS: 0, startArchS: 20, finishS: 251, cpEvery: 2,
+    spawnS: 0, startArchS: 20, finishS: 251,
     grid: [-115, 100, -290, 75],
     theme: {
       relief: 'canyon', sky: [0x3aa0f0, 0xd6ecf7, 0xf2e8d8], fog: 0xe8e4da, ground: 0xc49a6a, sun: 0xfff0d0,
@@ -898,21 +1066,18 @@ const MAPS = {
     obstacles() {
       // rochers sur le bord du bassin de départ
       rockXZ(11, 16, 1.6, 0x77736e); rockXZ(-10, 18, 1.4, 0x77736e); rockXZ(-10.5, 3, 1.2, 0x77736e);
-      // berges à pointes (côté : 1 = gauche, -1 = droite)
-      spikeWall(20, 32, -1);
-      spinner(42);                           // hélice à pointes dans le 1er rapide
-      spikeWall(54, 68, 1);
-      spikeWall(57, 66, -1);                 // couloir étroit : pointes des deux côtés
-      spinner(82, 2, 4.3, -0.55);            // celle-ci tourne dans l'autre sens
-      spikeWall(100, 116, 1);                // la cascade
-      spikeWall(122, 132, -1);
-      { const p = riverPoint(146, 0); whirlpool(p.x, p.z, 5); }
-      spinner(164, 2, 4.3, 0.65);
-      spikeWall(176, 190, 1);
-      spikeWall(179, 188, -1);               // couloir étroit
-      spinner(206, 2, 4.3, -0.6);            // hélice dans le grand rapide
-      spikeWall(226, 240, -1);
-      spikeWall(234, 246, 1);
+      // (côté : 1 = gauche, -1 = droite, 0 = les deux)
+      spikeWall(20, 32, -1);                 // berge à pointes
+      ringSpinner(56);                       // anneau à pointes
+      spinner(80, 2, 4.3, -0.55);            // hélice
+      ringSpinner(116, 7, 100, -0.38);       // anneau au-dessus du vide, en bas de la cascade
+      spikeWall(136, 148, 1);
+      spikeWall(139, 146, -1);               // couloir étroit : pointes des deux côtés
+      spinner(166, 2, 4.3, 0.65);
+      ringSpinner(194, 7, 100, 0.42);        // anneau au-dessus du vide
+      spinner(218, 2, 4.3, -0.6);            // hélice en bas du grand rapide
+      spikeWall(230, 246, -1);
+      spikeWall(234, 244, 1);                // dernier couloir
       // rochers sur le bord du bassin d'arrivée
       rockXZ(9, -220, 1.5, 0x77736e); rockXZ(-10, -216, 1.3, 0x77736e);
     },
@@ -956,7 +1121,7 @@ function buildMap(id) {
   mapId = id; MAP = MAPS[id];
   // on vide l'ancienne map
   for (const c of [...world.children]) { world.remove(c); disposeTree(c); }
-  for (const a of [walls, circles, movers, balls, foams, checkpoints, whirls, spikeWalls]) a.length = 0;
+  for (const a of [walls, circles, movers, balls, foams, checkpoints, whirls, spikeWalls, obstacleRanges]) a.length = 0;
   // le tracé
   PTS = MAP.pts.map(([x, z]) => ({ x, z })); WID = MAP.wid; H_KEYS = MAP.hkeys;
   segT = []; segLen = []; segCum = [0];
@@ -1005,7 +1170,7 @@ function buildMap(id) {
       const x = X0 + i * RES, z = Z0 + j * RES, k = (j * nx + i) * 3;
       const t = terrainAt(x, z);
       pos[k] = x; pos[k + 1] = t.y; pos[k + 2] = z;
-      const c = terrainColor(x, z, t.y, t.e, riverH(courseInfo(x, z).s));
+      const c = terrainColor(x, z, t.y, t.e, riverH(courseInfo(x, z).s), t.void || 0);
       col[k] = c.r; col[k + 1] = c.g; col[k + 2] = c.b;
     }
     const idx = new Uint32Array((nx - 1) * (nz - 1) * 6);
@@ -1034,8 +1199,9 @@ function buildMap(id) {
     const STEP = 0.8, N = Math.max(1, Math.ceil((s1 - s0) / STEP));
     for (let k = 0; k <= N; k++) {
       const s = Math.min(s1, s0 + k * STEP), p = pointAtS(s), t = smoothTangent(s), ln = leftN(t);
-      const w = halfWidthAt(s) + 2.5, y = riverH(s);
-      pos.push(p.x + ln.x * w, y, p.z + ln.z * w, p.x - ln.x * w, y, p.z - ln.z * w);
+      // au-dessus du vide, l'eau s'arrête pile au bord du toboggan
+      const hw = halfWidthAt(s), wl = hw + 2.5 * (1 - voidAt(s, 1)), wr = hw + 2.5 * (1 - voidAt(s, -1)), y = riverH(s);
+      pos.push(p.x + ln.x * wl, y, p.z + ln.z * wl, p.x - ln.x * wr, y, p.z - ln.z * wr);
       const f = flowAt(s), foam = Math.min(1, Math.abs(riverSlope(s)) * 3.2);
       aF.push(f, f); aU.push(0, 1); aFoam.push(foam, foam);
       if (k < N) { const a = 2 * k; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
@@ -1066,6 +1232,7 @@ function buildMap(id) {
   arch(FINISH_S, 'ARRIVÉE', '#f2c14e', '#2f3a33');
   finishLine(FINISH_S);
   MAP.obstacles();
+  voidEdges();
   makeCheckpoints();
   MAP.decor();
 }
@@ -1219,6 +1386,7 @@ function removeCrew(id) {
   if (i < 0) return;
   boatGroup.remove(crew[i].bear.root);
   boatGroup.remove(crew[i].zone);
+  stopVoice(crew[i].voice, false);
   crew.splice(i, 1);
 }
 // En multijoueur, chacun reste dans son quart du radeau
@@ -1281,9 +1449,10 @@ function respawnFx() {
 function placeAtCheckpoint() {
   let p, t;
   if (cpIndex < 0) { p = pointAtS(SPAWN_S); t = segT[0]; }
-  else { const cp = checkpoints[cpIndex]; p = { x: cp.x, z: cp.z }; t = segT[cp.i]; }
+  else { const cp = checkpoints[cpIndex]; p = { x: cp.x, z: cp.z }; t = smoothTangent(cp.s); }
   boat.x = p.x; boat.z = p.z; boat.vx = boat.vz = 0; boat.w = 0;
   boat.psi = Math.atan2(-t.x, -t.z);
+  boat.fall = null; boat.fallY = 0;
   boat.y = waterY(boat.x, boat.z);
   cam.yaw = boat.psi; cam.offset = 0;
   invuln = 1.5;
@@ -1300,6 +1469,25 @@ function popFx() {
       new V3(Math.cos(a) * rand(3, 7), rand(2, 6), Math.sin(a) * rand(3, 7)), i % 3 ? RAFT_COL : 0xffffff, rand(0.2, 0.45), 0.9);
   }
   toast('PAF ! Le radeau a crevé !', 1500);
+}
+// Chute dans le vide : le radeau tombe pendant un moment, puis repart au dernier point de passage
+function fallFx() {
+  tone('sine', 700, 120, 1.0, 0.25); noiseBurst(900, 200, 1.0, 0.15);
+  toast('AAAAH ! Tombé dans le vide !', 1600);
+  cam.shake = 0.2;
+}
+function startFall() {
+  if (boat.fall) return;
+  boat.fall = { t: 0, vy: 0 };
+  fallFx();
+  netEvent({ k: 'fall' });
+}
+function updateFall(dt) {
+  const f = boat.fall;
+  f.t += dt; f.vy -= 28 * dt;
+  boat.fallY += f.vy * dt;
+  boat.x += boat.vx * dt; boat.z += boat.vz * dt; boat.psi += boat.w * dt;
+  if (f.t > 1.2) { deaths++; sfxSplash(0.3); placeAtCheckpoint(); }
 }
 function pop() {
   deaths++;
@@ -1327,7 +1515,7 @@ addEventListener('keydown', e => {
   const fartKey = e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE';
   if (fartKey && !e.repeat) { updateFartKeys(); requestBurst(); sendInput(); }
   if (e.code === 'KeyR' && !e.repeat) requestRespawn();
-  if (e.code === 'KeyM' && !e.repeat) { muted = !muted; if (muted) stopFartLoop(); toast(muted ? 'Son coupé' : 'Son activé'); }
+  if (e.code === 'KeyM' && !e.repeat) { muted = !muted; if (muted) stopAllVoices(); toast(muted ? 'Son coupé' : 'Son activé'); }
 });
 // Échap : ouvrir / fermer le menu pause (géré avant les touches de jeu)
 addEventListener('keydown', e => {
@@ -1466,7 +1654,9 @@ function collideBoat() {
   let hit = 0;
   // les berges : le radeau reste dans la rivière
   const wr = waterRegion(boat.x, boat.z);
-  if (wr.e > -BOAT_R && (wr.nx || wr.nz)) hit = Math.max(hit, resolveContact(wr.nx, wr.nz, wr.e + BOAT_R));
+  // au-dessus du vide il n'y a pas de berge pour nous retenir…
+  const overVoid = !wr.pool && MAP.voids && MAP.voids.length && (() => { const so = sideOf(boat.x, boat.z); return voidAt(so.ci.s, so.side) > 0.5; })();
+  if (!overVoid && wr.e > -BOAT_R && (wr.nx || wr.nz)) hit = Math.max(hit, resolveContact(wr.nx, wr.nz, wr.e + BOAT_R));
   for (const w of walls) {
     const q = closestOnSeg(boat.x, boat.z, w.a, w.b);
     const dx = boat.x - q.x, dz = boat.z - q.z, d = Math.hypot(dx, dz), min = BOAT_R + w.th;
@@ -1526,6 +1716,7 @@ function setCheckpointColors() {
 
 // La simulation du radeau (faite par l'hôte, ou en solo)
 function simulate(dt) {
+  if (boat.fall) { updateFall(dt); runTime += dt; return; }
   for (const m of crew) {
     if (m !== me && m.netAlpha != null) m.alpha = angleLerp(m.alpha, m.netAlpha, 1 - Math.exp(-12 * dt));
     if (m.wantFart && m.gauge > 0 && !m.empty) {
@@ -1571,6 +1762,11 @@ function simulate(dt) {
   }
   invuln -= dt;
   if (deadlyHit) { deadlyHit = false; pop(); return; }
+  // …et si le radeau dépasse trop du bord, il tombe dans le vide !
+  if (MAP.voids && MAP.voids.length) {
+    const so = sideOf(boat.x, boat.z), hw = halfWidthAt(so.ci.s);
+    if (voidAt(so.ci.s, so.side) > 0.5 && Math.abs(so.lat) > hw - 1.0) { startFall(); return; }
+  }
   bonkCd -= dt;
   if (hit > 2 && bonkCd <= 0) { bonkCd = 0.25; bonkFx(hit); netEvent({ k: 'bonk', v: Math.round(hit * 10) / 10 }); }
 
@@ -1601,7 +1797,12 @@ function effects(dt) {
         [0x9cc94a, 0xb6d86a, 0xc8dc8a, 0x8fbf4a][Math.floor(rand(0, 4))], rand(0.3, 0.6), rand(0.9, 1.5));
     }
   }
-  if (any) { startFartLoop(); wobbleFartLoop(time); } else stopFartLoop();
+  // un vrai prout par joueur qui pète (on enchaîne tant qu'il tient la touche)
+  for (const m of crew) {
+    if (m.farting) {
+      if (!m.voice || m.voice.done) m.voice = playFart(null, m === me ? 1 : 0.55);
+    } else if (m.voice) { stopVoice(m.voice); m.voice = null; }
+  }
   const sp = Math.hypot(boat.vx, boat.vz);
   if (Math.random() < sp * dt * 3) {
     const a = rand(0, Math.PI * 2);
@@ -1610,7 +1811,7 @@ function effects(dt) {
 }
 
 function showWin() {
-  stopFartLoop(); sfxWin();
+  stopAllVoices(); sfxWin();
   me.wantFart = false;
   $('winTime').textContent = fmtTime(runTime);
   $('winDeaths').textContent = deaths;
@@ -1668,7 +1869,7 @@ function leaveGame(msg) {
   const old = net.peer;
   net.role = 'solo'; net.peer = null; net.host = null; net.conns.clear(); net.target = null; net.joined = false; net.code = '';
   try { if (old) old.destroy(); } catch (_) {}
-  stopFartLoop();
+  stopAllVoices();
   resetToSolo();
   state = 'menu'; resetGame();
   $('lobby').classList.add('hidden'); $('win').classList.add('hidden'); $('menu').classList.remove('hidden');
@@ -1725,7 +1926,7 @@ function hostReceive(conn, d) {
 function broadcastState() {
   const r = v => Math.round(v * 1000) / 1000;
   broadcast({
-    t: 'st', s: state, mp: mapId, tm: r(time), rt: r(runTime), cp: cpIndex, dz: deaths,
+    t: 'st', s: state, mp: mapId, tm: r(time), rt: r(runTime), cp: cpIndex, dz: deaths, fy: r(boat.fallY || 0),
     b: [boat.x, boat.z, boat.vx, boat.vz, boat.psi, boat.w].map(r),
     c: crew.map(m => [m.id, m.name, m.slot, r(m.alpha), r(m.dirYaw), m.farting ? 1 : 0, r(m.gauge), m.empty ? 1 : 0]),
   });
@@ -1771,6 +1972,7 @@ function clientReceive(d) {
     if (d.k === 'bonk') bonkFx(d.v);
     else if (d.k === 'respawn') { net.snap = true; respawnFx(); }
     else if (d.k === 'pop') { popFx(); net.snap = true; }
+    else if (d.k === 'fall') fallFx();
     else if (d.k === 'burst' && d.id !== net.myId) { const m = crew.find(x => x.id === d.id); if (m) showBurst(m); }
   }
 }
@@ -1789,6 +1991,8 @@ function applyState(d) {
   }
   net.target = { x: d.b[0], z: d.b[1], vx: d.b[2], vz: d.b[3], psi: d.b[4], w: d.b[5], at: performance.now() };
   if (net.snap) { net.snap = false; boat.x = d.b[0]; boat.z = d.b[1]; boat.psi = d.b[4]; }
+  if ((boat.fallY || 0) < -0.5 && !(d.fy < -0.5)) net.snap = true;   // fin de chute : on se replace d'un coup
+  boat.fallY = d.fy || 0;
   deaths = d.dz;
   if (d.cp !== cpIndex) {
     if (d.cp > cpIndex && state === 'play') { sfxCheck(); toast('Point de passage !'); }
@@ -1898,7 +2102,7 @@ $('resumeBtn').addEventListener('click', closePause);
 $('quitBtn').addEventListener('click', () => {
   closePause();
   if (net.role !== 'solo') { leaveGame(); return; }
-  stopFartLoop(); state = 'menu'; resetGame();
+  stopAllVoices(); state = 'menu'; resetGame();
   $('menu').classList.remove('hidden');
 });
 
@@ -2035,7 +2239,7 @@ function step(dt) {
     localControls(dt);
     if (net.role === 'client') clientFollow(dt); else simulate(dt);
   }
-  boat.y = waterY(boat.x, boat.z);
+  boat.y = waterY(boat.x, boat.z) + (boat.fallY || 0);
   netTick(dt);
 }
 function frame() {
@@ -2044,7 +2248,7 @@ function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 30);
   step(dt);
   waterMat.uniforms.t.value = time;
-  if (state === 'play') effects(dt); else stopFartLoop();
+  if (state === 'play') effects(dt); else stopAllVoices();
 
   // le radeau flotte et suit la pente de l'eau
   const ci = courseInfo(boat.x, boat.z), tg = smoothTangent(ci.s), k = Math.atan(riverSlope(ci.s));
@@ -2100,7 +2304,8 @@ try {
 window.__game = {
   boat, crew, get me() { return me; }, net, checkpoints, keys, get state() { return state; }, get deaths() { return deaths; }, respawn,
   setCp: i => { cpIndex = i; placeAtCheckpoint(); }, courseInfo, pointAtS, circles, balls, movers, riverH, buildMap,
-  get segT() { return segT; }, get mapId() { return mapId; }, get finishS() { return FINISH_S; }, halfWidthAt,
+  get segT() { return segT; }, get mapId() { return mapId; }, get time() { return time; },
+  fartCheck: () => { audio(); return Object.keys(FART_TYPES).map(k => { const d = synthFart(k).getChannelData(0); let e = 0, nan = 0; for (const v of d) { if (Number.isNaN(v)) nan++; e += v * v; } return k + ':' + Math.sqrt(e / d.length).toFixed(3) + (nan ? ' NaN!' : ''); }); }, get finishS() { return FINISH_S; }, halfWidthAt,
   // pas de simulation sans affichage (pour les tests automatiques)
   tick: dt => { step(dt); animateCrew(dt, time); },
 };
