@@ -49,6 +49,7 @@
   .chip { display: inline-flex; align-items: center; gap: 8px; background: #fff; border: 2px solid #d9dccf; border-radius: 999px; padding: 6px 14px; font-weight: 700; }
   .chip i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
   .count { width: 100%; font-size: 14px; opacity: .7; margin-top: 4px; }
+  .credits { font-size: 11px; opacity: .55; margin: 14px 0 0; line-height: 1.4; }
   .pillBtn { pointer-events: auto; cursor: pointer; border: none; font-family: inherit; }
   .pillBtn:hover { background: #fff; transform: translateY(-1px); }
   #settings, #pause { z-index: 20; }
@@ -128,6 +129,7 @@
       </div>
     </div>
     <div id="menuMsg"></div>
+    <p class="credits">Bruits de prouts : « Human fart.wav » par Subhashish Panigrahi (CC BY-SA 4.0) et « Flatulence.wav » par JohnSumisu (CC BY-SA 3.0), via Wikimedia Commons.</p>
   </div>
 </div>
 
@@ -264,7 +266,7 @@ function audio() {
   if (!actx) {
     actx = new (window.AudioContext || window.webkitAudioContext)();
     master = actx.createGain(); master.gain.value = settings.volume / 100; master.connect(actx.destination);
-    setTimeout(ensureFartBank, 0);   // prépare les prouts à l'avance
+    setTimeout(() => { loadRealFarts(); ensureFartBank(); }, 0);   // prépare les prouts à l'avance
   }
   if (actx.state === 'suspended') actx.resume();
   return actx;
@@ -331,9 +333,51 @@ function ensureFartBank() {
   fartBank = {};
   for (const type of Object.keys(FART_TYPES)) fartBank[type] = [synthFart(type), synthFart(type), synthFart(type)];
 }
+// Vrais prouts enregistrés (Wikimedia Commons, voir les crédits) : on les découpe en morceaux
+// et on les joue un peu plus aigus ou plus graves pour qu'ils ne se ressemblent pas tous.
+const REAL_FART_FILES = ['sounds/fart2.wav', 'sounds/fart3.wav'];
+let realFarts = [];       // { buf, start, dur }
+let realFartsLoading = false;
+function splitIntoFarts(buf) {
+  // on repère les moments où ça fait du bruit (enveloppe) pour isoler chaque prout
+  const d = buf.getChannelData(0), sr = buf.sampleRate, win = Math.floor(sr * 0.02), env = [];
+  let peak = 0;
+  for (let i = 0; i + win <= d.length; i += win) { let e = 0; for (let j = i; j < i + win; j++) e += d[j] * d[j]; e = Math.sqrt(e / win); env.push(e); peak = Math.max(peak, e); }
+  const th = peak * 0.12, segs = [];
+  let start = -1, quiet = 0;
+  for (let k = 0; k < env.length; k++) {
+    if (env[k] > th) { if (start < 0) start = k; quiet = 0; }
+    else if (start >= 0 && ++quiet > 6) { segs.push([start, k - quiet]); start = -1; quiet = 0; }
+  }
+  if (start >= 0) segs.push([start, env.length - 1]);
+  return segs.map(([a, b]) => ({ buf, start: Math.max(0, a * 0.02 - 0.02), dur: (b - a + 1) * 0.02 + 0.08, gain: Math.min(3, 0.5 / (peak || 1)) }))
+    .filter(sg => sg.dur > 0.15);
+}
+function loadRealFarts() {
+  if (realFartsLoading || !actx) return;
+  realFartsLoading = true;
+  for (const url of REAL_FART_FILES) {
+    fetch(url).then(r => { if (!r.ok) throw new Error(url); return r.arrayBuffer(); })
+      .then(ab => actx.decodeAudioData(ab))
+      .then(buf => { realFarts.push(...splitIntoFarts(buf)); })
+      .catch(() => {});   // fichier absent : on garde les prouts fabriqués
+  }
+}
+function playRealFart(vol) {
+  const sg = realFarts[Math.floor(Math.random() * realFarts.length)];
+  const src = actx.createBufferSource(); src.buffer = sg.buf;
+  const rate = rand(0.75, 1.3); src.playbackRate.value = rate;
+  const g = actx.createGain(); g.gain.value = vol * sg.gain;
+  src.connect(g).connect(master); src.start(0, sg.start, sg.dur);
+  const v = { src, g, done: false };
+  src.onended = () => { v.done = true; };
+  return v;
+}
 // joue un prout ; renvoie une "voix" qu'on peut arrêter
 function playFart(type, vol = 1) {
   if (!actx || muted) return null;
+  loadRealFarts();
+  if (realFarts.length && type !== 'tiny') return playRealFart(vol);
   ensureFartBank();
   const list = fartBank[type || FART_MIX[Math.floor(Math.random() * FART_MIX.length)]];
   const src = actx.createBufferSource(); src.buffer = list[Math.floor(Math.random() * list.length)];
@@ -350,7 +394,7 @@ function stopVoice(v, tail = true) {
   v.g.gain.setTargetAtTime(0, now, 0.035);
   try { v.src.stop(now + 0.25); } catch (_) {}
   v.done = true;
-  if (tail && Math.random() < 0.5) playFart('tiny', v.g.gain.value * 0.6);
+  if (tail && !realFarts.length && Math.random() < 0.5) playFart('tiny', v.g.gain.value * 0.6);
 }
 function stopAllVoices() { for (const m of crew) { stopVoice(m.voice, false); m.voice = null; } }
 function tone(type, f1, f2, dur, vol = 0.25, delay = 0) {
@@ -393,6 +437,7 @@ const foams = [];        // ronds d'écume autour des obstacles
 const checkpoints = [];  // points de passage
 const whirls = [];       // tourbillons
 const spikeWalls = [];   // berges à pointes (mortelles)
+const holes = [];        // trous dans l'eau (on tombe dedans !)
 let flowTable = [];
 const leftN = t => ({ x: t.z, z: -t.x });
 
@@ -903,6 +948,32 @@ function ringSpinner(s, R = 7, gapDeg = 100, speed = 0.4) {
   for (const arc of local) for (let i = 0; i < arc.length - 1; i++) segs.push({ a: { x: 0, z: 0 }, b: { x: 0, z: 0 } });
   movers.push({ kind: 'spin', cx: p.x, cz: p.z, local, segs, w: speed, phase: (s * 1.37) % 6.28, th: 0.8, group: g });
 }
+// Trous dans l'eau : un tourbillon noir qui avale le radeau si son milieu passe dessus
+let holeTex = null;
+function makeHoles() {
+  const list = MAP.holes || [];
+  if (!list.length) return;
+  if (!holeTex) {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+    const ctx = cv.getContext('2d');
+    const grd = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0, 'rgba(0,0,0,1)'); grd.addColorStop(0.55, 'rgba(5,20,30,1)'); grd.addColorStop(0.8, 'rgba(10,60,80,0.9)'); grd.addColorStop(1, 'rgba(20,110,130,0)');
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, 128, 128);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 3;
+    for (let k = 0; k < 3; k++) { ctx.beginPath(); for (let i = 0; i < 60; i++) { const tt = i / 60, a = k * 2.1 + tt * 5, rr = 20 + tt * 38; i ? ctx.lineTo(64 + Math.cos(a) * rr, 64 + Math.sin(a) * rr) : ctx.moveTo(64 + Math.cos(a) * rr, 64 + Math.sin(a) * rr); } ctx.stroke(); }
+    holeTex = new THREE.CanvasTexture(cv); holeTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  let sMin = Infinity, sMax = -Infinity;
+  for (const [s, lat, r] of list) {
+    const p = riverPoint(s, lat);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(r * 1.35, 32), new THREE.MeshBasicMaterial({ map: holeTex, transparent: true, depthWrite: false }));
+    disc.rotation.x = -Math.PI / 2; disc.position.set(p.x, p.y + 0.04, p.z); world.add(disc);
+    foamRing(p.x, p.y, p.z, r * 1.05);
+    holes.push({ x: p.x, z: p.z, r, mesh: disc });
+    sMin = Math.min(sMin, s - r); sMax = Math.max(sMax, s + r);
+  }
+  obsRange(sMin - 4, sMax + 4);   // tout le bassin aux trous compte comme un seul obstacle
+}
 // Bords du toboggan au-dessus du vide (côté de la rivière qui descend dans le gouffre)
 function voidEdges() {
   for (const v of (MAP.voids || [])) {
@@ -1049,14 +1120,15 @@ const MAPS = {
   },
   canyon: {
     name: 'Le Canyon', emoji: '🏜️',
-    // parcours sinueux : plein de virages, des berges à pointes à l'extérieur des virages
-    pts: [[0, 10], [0, -20], [-12, -38], [-26, -50], [-30, -70], [-20, -90], [0, -100], [18, -112], [24, -132], [14, -152], [-2, -165], [-4, -185], [0, -200]],
-    wid: [11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11],   // rivière très étroite
-    bulges: [{ s: 80, w: 19, len: 12 }, { s: 166, w: 19, len: 12 }, { s: 218, w: 19, len: 12 }],
-    voids: [{ s0: 36, s1: 66, side: 0 }, { s0: 92, s1: 128, side: 0 }, { s0: 182, s1: 206, side: 0 }],   // toboggan au-dessus du vide
-    hkeys: [[0, 0], [34, 0], [48, -4], [95, -4], [108, -9], [150, -9], [160, -7], [198, -7], [214, -12], [400, -12]],
-    pools: [{ x: 0, z: 10, r: 15 }, { x: 0, z: -212, r: 14 }],
-    spawnS: 0, startArchS: 20, finishS: 251,
+    // parcours avec des virages violents (presque à angle droit) et étroits
+    pts: [[0, 10], [0, -22], [-14, -36], [-14, -58], [8, -56], [8, -82], [8, -118], [-12, -120], [-12, -142], [2, -164], [0, -196]],
+    wid: [11, 11, 11, 10, 10, 11, 10, 10, 11, 11, 11],   // rivière très étroite, encore plus dans les virages
+    bulges: [{ s: 140, w: 26, len: 20 }, { s: 234, w: 19, len: 12 }],   // le grand bassin aux trous + l'hélice
+    voids: [{ s0: 30, s1: 46, side: 0 }, { s0: 161, s1: 176, side: 0 }, { s0: 204, s1: 222, side: 0 }],   // toboggans au-dessus du vide
+    holes: [[128, -2, 2.0], [133, 5, 2.2], [138, -6, 2.0], [140, 1.5, 2.0], [146, 7, 2.0], [147, -3, 2.2], [153, 3, 2.0]],   // [distance, côté, rayon] : un slalom entre les trous
+    hkeys: [[0, 0], [50, 0], [62, -4], [158, -4], [172, -9], [224, -9], [240, -14], [400, -14]],
+    pools: [{ x: 0, z: 10, r: 15 }, { x: 0, z: -208, r: 14 }],
+    spawnS: 0, startArchS: 22, finishS: 254,
     grid: [-115, 100, -290, 75],
     theme: {
       relief: 'canyon', sky: [0x3aa0f0, 0xd6ecf7, 0xf2e8d8], fog: 0xe8e4da, ground: 0xc49a6a, sun: 0xfff0d0,
@@ -1067,19 +1139,19 @@ const MAPS = {
       // rochers sur le bord du bassin de départ
       rockXZ(11, 16, 1.6, 0x77736e); rockXZ(-10, 18, 1.4, 0x77736e); rockXZ(-10.5, 3, 1.2, 0x77736e);
       // (côté : 1 = gauche, -1 = droite, 0 = les deux)
-      spikeWall(20, 32, -1);                 // berge à pointes
-      ringSpinner(56);                       // anneau à pointes
-      spinner(80, 2, 4.3, -0.55);            // hélice
-      ringSpinner(116, 7, 100, -0.38);       // anneau au-dessus du vide, en bas de la cascade
-      spikeWall(136, 148, 1);
-      spikeWall(139, 146, -1);               // couloir étroit : pointes des deux côtés
-      spinner(166, 2, 4.3, 0.65);
-      ringSpinner(194, 7, 100, 0.42);        // anneau au-dessus du vide
-      spinner(218, 2, 4.3, -0.6);            // hélice en bas du grand rapide
-      spikeWall(230, 246, -1);
-      spikeWall(234, 244, 1);                // dernier couloir
+      spikeWall(14, 24, -1);                 // berge à pointes
+      ringSpinner(38);                       // anneau à pointes au-dessus du vide
+      spikeWall(54, 64, 1);
+      spikeWall(68, 80, 1);                  // 1er virage violent : pointes à l'extérieur
+      spikeWall(90, 102, -1);                // 2e virage violent
+      // (le grand bassin aux trous est construit à part, voir "holes")
+      spikeWall(180, 192, 1);                // virage violent après la cascade au-dessus du vide
+      ringSpinner(213, 7, 100, 0.42);        // anneau au-dessus du vide
+      spinner(234, 2, 4.3, -0.6);            // hélice dans le dernier rapide
+      spikeWall(244, 252, -1);
+      spikeWall(246, 252, 1);                // dernier couloir
       // rochers sur le bord du bassin d'arrivée
-      rockXZ(9, -220, 1.5, 0x77736e); rockXZ(-10, -216, 1.3, 0x77736e);
+      rockXZ(9, -216, 1.5, 0x77736e); rockXZ(-10, -212, 1.3, 0x77736e);
     },
     decor() {
       scatter(170, 3000, [-90, 75, -270, 60], (x, y, z, e) => {
@@ -1121,7 +1193,7 @@ function buildMap(id) {
   mapId = id; MAP = MAPS[id];
   // on vide l'ancienne map
   for (const c of [...world.children]) { world.remove(c); disposeTree(c); }
-  for (const a of [walls, circles, movers, balls, foams, checkpoints, whirls, spikeWalls, obstacleRanges]) a.length = 0;
+  for (const a of [walls, circles, movers, balls, foams, checkpoints, whirls, spikeWalls, obstacleRanges, holes]) a.length = 0;
   // le tracé
   PTS = MAP.pts.map(([x, z]) => ({ x, z })); WID = MAP.wid; H_KEYS = MAP.hkeys;
   segT = []; segLen = []; segCum = [0];
@@ -1232,6 +1304,7 @@ function buildMap(id) {
   arch(FINISH_S, 'ARRIVÉE', '#f2c14e', '#2f3a33');
   finishLine(FINISH_S);
   MAP.obstacles();
+  makeHoles();
   voidEdges();
   makeCheckpoints();
   MAP.decor();
@@ -1337,15 +1410,38 @@ function makeGuy(slot) {
   // tête
   const head = new THREE.Group(); head.position.set(0, 0.62, 0.02); model.add(head);
   sph(head, 0.36, skinM, 0, 0, 0);
-  const eyeL = sph(head, 0.065, darkM, -0.13, 0.04, 0.31, 1, 1.25, 1, false);
-  const eyeR = sph(head, 0.065, darkM, 0.13, 0.04, 0.31, 1, 1.25, 1, false);
+  // les yeux : blanc + pupille + reflet (ils gonflent quand il pète !)
   const shine = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  [eyeL, eyeR].forEach(e => { const s = new THREE.Mesh(sphereGeo, shine); s.scale.setScalar(0.35); s.position.set(0.3, 0.35, 0.75); e.add(s); });
-  sph(head, 0.06, toon(SKINS[slot % 4]), 0, -0.04, 0.35, 1, 0.9, 1, false);
-  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.02, 6, 12, Math.PI), darkM);
-  mouth.position.set(0, -0.13, 0.32); mouth.rotation.z = Math.PI; head.add(mouth);
-  const cheekL = sph(head, 0.08, pinkM, -0.22, -0.08, 0.27, 1, 0.6, 0.5, false);
-  const cheekR = sph(head, 0.08, pinkM, 0.22, -0.08, 0.27, 1, 0.6, 0.5, false);
+  const eyes = [];
+  for (const sx of [-0.125, 0.125]) {
+    const eye = new THREE.Group(); eye.position.set(sx, -0.005, 0.3); head.add(eye);
+    const white = new THREE.Mesh(sphereGeo, toon(0xffffff)); white.scale.set(0.082, 0.1, 0.06); eye.add(white);
+    const rim = new THREE.Mesh(sphereGeo, outlineMat); rim.scale.set(0.094, 0.112, 0.066); eye.add(rim);
+    const pupil = new THREE.Mesh(sphereGeo, darkM); pupil.scale.set(0.045, 0.055, 0.03); pupil.position.z = 0.042; eye.add(pupil);
+    const glint = new THREE.Mesh(sphereGeo, shine); glint.scale.setScalar(0.015); glint.position.set(0.016, 0.022, 0.072); eye.add(glint);
+    eyes.push({ g: eye, white, pupil });
+  }
+  // les sourcils (ils se froncent sous l'effort)
+  const brows = [];
+  for (const sx of [-0.125, 0.125]) {
+    const br = new THREE.Mesh(new THREE.CapsuleGeometry(0.02, 0.08, 3, 6), darkM);
+    br.rotation.z = Math.PI / 2; br.position.set(sx, 0.105, 0.33); head.add(br);
+    brows.push(br);
+  }
+  sph(head, 0.06, toon(SKINS[slot % 4]), 0, -0.06, 0.35, 1, 0.9, 1, false);
+  // la bouche : un sourire… qui devient un "O" quand il pousse
+  const smile = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.02, 6, 12, Math.PI), darkM);
+  smile.position.set(0, -0.15, 0.32); smile.rotation.z = Math.PI; head.add(smile);
+  const oMouth = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.02, 6, 14), darkM);
+  oMouth.position.set(0, -0.16, 0.325); oMouth.visible = false; head.add(oMouth);
+  const oIn = new THREE.Mesh(new THREE.CircleGeometry(0.046, 14), toon(0x6b1f1f)); oIn.position.z = -0.006; oMouth.add(oIn);
+  // les joues (elles gonflent et rougissent)
+  const cheekM = new THREE.MeshToonMaterial({ color: 0xf0a08a, gradientMap: gradTex });
+  const cheekL = sph(head, 0.08, cheekM, -0.22, -0.09, 0.27, 1, 0.6, 0.5, false);
+  const cheekR = sph(head, 0.08, cheekM, 0.22, -0.09, 0.27, 1, 0.6, 0.5, false);
+  // une goutte de sueur quand ça force
+  const sweat = new THREE.Mesh(sphereGeo, new THREE.MeshToonMaterial({ color: 0x9fe0ff, gradientMap: gradTex }));
+  sweat.scale.set(0.035, 0.05, 0.035); sweat.position.set(0.3, 0.08, 0.18); sweat.visible = false; head.add(sweat);
   // casque
   const helmet = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.39, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2), helmM));
   helmet.position.set(0, 0.06, -0.02); helmet.rotation.x = -0.15; head.add(helmet); outline(helmet, 1.04);
@@ -1353,7 +1449,7 @@ function makeGuy(slot) {
   visor.position.set(0, 0.07, 0.04); visor.rotation.x = -0.15; head.add(visor);
   // les fesses (d'où sort le gaz !)
   const tail = sph(model, 0.13, pantsM, 0, -0.36, -0.34, 1, 1, 1, false);
-  return { root, model, head, armL, armR, legL, legR, tail, eyes: [eyeL, eyeR], cheeks: [cheekL, cheekR] };
+  return { root, model, head, armL, armR, legL, legR, tail, eyes, brows, smile, oMouth, cheeks: [cheekL, cheekR], cheekM, sweat };
 }
 function makeLabel(text, color) {
   const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
@@ -1471,22 +1567,26 @@ function popFx() {
   toast('PAF ! Le radeau a crevé !', 1500);
 }
 // Chute dans le vide : le radeau tombe pendant un moment, puis repart au dernier point de passage
-function fallFx() {
+function fallFx(hole) {
   tone('sine', 700, 120, 1.0, 0.25); noiseBurst(900, 200, 1.0, 0.15);
-  toast('AAAAH ! Tombé dans le vide !', 1600);
+  toast(hole ? 'GLOUP ! Avalé par un trou !' : 'AAAAH ! Tombé dans le vide !', 1600);
   cam.shake = 0.2;
 }
-function startFall() {
+function startFall(hole) {
   if (boat.fall) return;
-  boat.fall = { t: 0, vy: 0 };
-  fallFx();
-  netEvent({ k: 'fall' });
+  boat.fall = { t: 0, vy: 0, hole: hole || null };
+  fallFx(!!hole);
+  netEvent({ k: 'fall', h: hole ? 1 : 0 });
 }
 function updateFall(dt) {
   const f = boat.fall;
   f.t += dt; f.vy -= 28 * dt;
   boat.fallY += f.vy * dt;
-  boat.x += boat.vx * dt; boat.z += boat.vz * dt; boat.psi += boat.w * dt;
+  if (f.hole) {
+    // aspiré au milieu du trou en tournant
+    boat.x += (f.hole.x - boat.x) * Math.min(1, dt * 6); boat.z += (f.hole.z - boat.z) * Math.min(1, dt * 6);
+    boat.vx = boat.vz = 0; boat.psi += 8 * dt;
+  } else { boat.x += boat.vx * dt; boat.z += boat.vz * dt; boat.psi += boat.w * dt; }
   if (f.t > 1.2) { deaths++; sfxSplash(0.3); placeAtCheckpoint(); }
 }
 function pop() {
@@ -1762,6 +1862,10 @@ function simulate(dt) {
   }
   invuln -= dt;
   if (deadlyHit) { deadlyHit = false; pop(); return; }
+  // trous dans l'eau : si le milieu du radeau passe au-dessus, il est avalé
+  for (const h of holes) {
+    if (Math.hypot(boat.x - h.x, boat.z - h.z) < h.r + 0.8) { startFall(h); return; }
+  }
   // …et si le radeau dépasse trop du bord, il tombe dans le vide !
   if (MAP.voids && MAP.voids.length) {
     const so = sideOf(boat.x, boat.z), hw = halfWidthAt(so.ci.s);
@@ -1784,8 +1888,73 @@ function simulate(dt) {
 }
 let bonkCd = 0;
 
+// Petits détails : lignes d'odeur qui ondulent, ronds dans l'eau derrière le radeau
+const stinkTex = (() => {
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 128;
+  const ctx = cv.getContext('2d'); ctx.lineCap = 'round';
+  for (const [x0, col] of [[18, '#7fbf3a'], [34, '#9ad14a'], [50, '#7fbf3a']]) {
+    ctx.strokeStyle = '#2b3a1a'; ctx.lineWidth = 9; ctx.beginPath();
+    for (let y = 120; y >= 8; y -= 4) { const x = x0 + Math.sin(y * 0.09 + x0) * 6; y === 120 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = 5; ctx.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const stinks = [];
+function spawnStink(pos) {
+  let s = stinks.find(q => q.life <= 0);
+  if (!s) {
+    if (stinks.length > 30) return;
+    s = { spr: new THREE.Sprite(new THREE.SpriteMaterial({ map: stinkTex, transparent: true, depthWrite: false })), life: 0 };
+    scene.add(s.spr); stinks.push(s);
+  }
+  s.spr.position.copy(pos); s.spr.visible = true; s.life = s.max = rand(1.0, 1.5); s.sway = rand(0, 6);
+}
+const ripples = [];
+const rippleGeo = new THREE.RingGeometry(0.92, 1, 40);
+function spawnRipple(x, y, z, r0) {
+  let rp = ripples.find(q => q.life <= 0);
+  if (!rp) {
+    if (ripples.length > 24) return;
+    rp = { mesh: new THREE.Mesh(rippleGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, side: THREE.DoubleSide })), life: 0 };
+    rp.mesh.rotation.x = -Math.PI / 2; scene.add(rp.mesh); ripples.push(rp);
+  }
+  rp.mesh.position.set(x, y + 0.06, z); rp.mesh.visible = true; rp.r0 = r0; rp.life = rp.max = 1.3;
+}
+function updateDetails(dt, t) {
+  for (const s of stinks) {
+    if (s.life <= 0) continue;
+    s.life -= dt; const k = 1 - s.life / s.max;
+    s.spr.position.y += dt * 1.1; s.spr.position.x += Math.sin(t * 3 + s.sway) * dt * 0.4;
+    s.spr.scale.set(0.6 + k * 0.4, 1.0 + k * 0.6, 1);
+    s.spr.material.opacity = Math.sin(Math.PI * Math.min(1, k * 1.2)) * 0.9;
+    if (s.life <= 0) s.spr.visible = false;
+  }
+  for (const rp of ripples) {
+    if (rp.life <= 0) continue;
+    rp.life -= dt; const k = 1 - rp.life / rp.max;
+    rp.mesh.scale.setScalar(rp.r0 * (1 + k * 0.9));
+    rp.mesh.material.opacity = (1 - k) * 0.55;
+    if (rp.life <= 0) rp.mesh.visible = false;
+  }
+}
+let rippleT = 0;
 // Effets visuels et sonores (sur tous les écrans)
 function effects(dt) {
+  // ronds dans l'eau quand le radeau avance, et lignes d'odeur au-dessus des prouts
+  rippleT -= dt;
+  const spd = Math.hypot(boat.vx, boat.vz);
+  if (spd > 1.2 && rippleT <= 0 && !boat.fall) { rippleT = clamp(0.9 - spd * 0.07, 0.25, 0.9); spawnRipple(boat.x, boat.y, boat.z, BOAT_R * 1.05); }
+  for (const m of crew) {
+    if (!m.farting) continue;
+    m.stinkT = (m.stinkT || 0) - dt;
+    if (m.stinkT <= 0) {
+      m.stinkT = rand(0.25, 0.45);
+      const tp = m.bear.tail.getWorldPosition(new V3()), d = thrustDir(m);
+      spawnStink(new V3(tp.x - d.x * rand(0.8, 1.6), tp.y + rand(0.6, 1.0), tp.z - d.z * rand(0.8, 1.6)));
+      // des bulles qui remontent dans l'eau derrière le radeau
+      for (let i = 0; i < 3; i++) spawnPuff(new V3(tp.x - d.x * rand(1, 2) + rand(-0.4, 0.4), boat.y + 0.05, tp.z - d.z * rand(1, 2) + rand(-0.4, 0.4)), new V3(rand(-0.3, 0.3), rand(1.5, 2.5), rand(-0.3, 0.3)), 0xe8fbff, rand(0.06, 0.13), 0.45, 0.6);
+    }
+  }
   let any = false;
   for (const m of crew) {
     if (!m.farting) continue;
@@ -1972,7 +2141,7 @@ function clientReceive(d) {
     if (d.k === 'bonk') bonkFx(d.v);
     else if (d.k === 'respawn') { net.snap = true; respawnFx(); }
     else if (d.k === 'pop') { popFx(); net.snap = true; }
-    else if (d.k === 'fall') fallFx();
+    else if (d.k === 'fall') fallFx(!!d.h);
     else if (d.k === 'burst' && d.id !== net.myId) { const m = crew.find(x => x.id === d.id); if (m) showBurst(m); }
   }
 }
@@ -2125,9 +2294,35 @@ function animateCrew(dt, t) {
     b.model.rotation.set(m.fartAnim * 0.35 + shake, 0, (walk ? Math.sin(t * 14) * 0.12 : 0) + shake);
     const puff = 1 + m.fartAnim * 0.1;
     b.model.scale.set(puff, 1 - m.fartAnim * 0.06 + Math.sin(t * 3 + m.slot) * 0.015, puff);
+    // l'effort du prout : 0 = détendu, 1 = il pousse fort (un peu plus au début de chaque prout)
+    const strain = clamp(m.fartAnim / 0.6, 0, 1.5);
     b.head.rotation.x = -m.fartAnim * 0.35;
-    b.cheeks.forEach(c => c.scale.set(0.08 * (1 + m.fartAnim * 0.8), 0.048 * (1 + m.fartAnim * 0.8), 0.04));
+    b.head.position.x = strain > 0.3 ? Math.sin(t * 47 + m.slot) * 0.012 * strain : 0;   // la tête tremble
+    b.cheeks.forEach(c => c.scale.set(0.08 * (1 + strain * 0.9), 0.048 * (1 + strain * 0.9), 0.04 * (1 + strain * 0.8)));
+    b.cheekM.color.setHex(0xf0a08a).lerp(_redFace, Math.min(1, strain));
     b.tail.scale.setScalar(0.13 * (1 + m.fartAnim * 0.6));
+    // les yeux qui gonflent et sortent de la tête !
+    m.blink -= dt;
+    const blinking = m.blink < 0.12 && strain < 0.2;
+    for (const e of b.eyes) {
+      const k = 1 + strain * 0.85;
+      e.g.scale.set(k, blinking ? 0.12 : k, k);
+      e.g.position.z = 0.3 + strain * 0.06;
+      const ps = 1 - Math.min(0.55, strain * 0.45);
+      e.pupil.scale.set(0.045 * ps, 0.055 * ps, 0.03);
+      e.pupil.position.x = strain > 0.4 ? rand(-0.01, 0.01) : 0;
+      e.pupil.position.y = strain > 0.4 ? rand(-0.01, 0.01) : 0;
+    }
+    if (m.blink < 0) m.blink = rand(2, 5);
+    // les sourcils se froncent et remontent
+    b.brows[0].rotation.z = Math.PI / 2 - strain * 0.45; b.brows[1].rotation.z = Math.PI / 2 + strain * 0.45;
+    for (const br of b.brows) br.position.y = 0.105 + strain * 0.035;
+    // sourire / bouche en "O"
+    b.smile.visible = strain < 0.25; b.oMouth.visible = !b.smile.visible;
+    b.oMouth.scale.set(0.7 + strain * 0.6, (0.7 + strain * 0.9) * (1 + Math.sin(t * 28) * 0.08 * strain), 1);
+    // une goutte de sueur qui coule quand il force longtemps
+    b.sweat.visible = strain > 0.8;
+    if (b.sweat.visible) b.sweat.position.y = 0.1 - ((t * 0.7 + m.slot * 0.3) % 1) * 0.2;
     if (state === 'win') {
       b.model.rotation.y = t * 6 + m.slot;
       b.armL.rotation.z = -2.4 + Math.sin(t * 12 + m.slot) * 0.3; b.armR.rotation.z = 2.4 - Math.sin(t * 12 + m.slot) * 0.3;
@@ -2138,12 +2333,9 @@ function animateCrew(dt, t) {
       b.armR.rotation.z = damp(b.armR.rotation.z, up * 2.2 - (walk ? Math.sin(t * 14) * 0.3 : 0), 10, dt);
       b.legL.rotation.x = walk ? Math.sin(t * 14) * 0.4 : 0; b.legR.rotation.x = walk ? -Math.sin(t * 14) * 0.4 : 0;
     }
-    m.blink -= dt;
-    const ey = m.blink < 0.12 || m.farting ? 0.15 : 1.25;
-    b.eyes.forEach(e => { e.scale.y = 0.065 * ey; });
-    if (m.blink < 0) m.blink = rand(2, 5);
   }
 }
+const _redFace = new THREE.Color(0xe8423a);
 
 // =============================================================== CAMÉRA
 const camLook = new V3(), camTarget = new V3();
@@ -2172,6 +2364,10 @@ function updateCamera(dt, t) {
     camera.position.x += rand(-1, 1) * cam.shake * 0.5; camera.position.y += rand(-1, 1) * cam.shake * 0.5;
   }
   camera.lookAt(camLook);
+  if (cam.faceView) {   // vue de test : gros plan sur le visage de mon bonhomme
+    const hp = me.bear.head.getWorldPosition(new V3()), f = new V3(0, 0, 1).applyQuaternion(me.bear.head.getWorldQuaternion(new THREE.Quaternion()));
+    camera.position.copy(hp).addScaledVector(f, 1.5).add(new V3(0, 0.15, 0)); camera.lookAt(hp);
+  }
   sky.position.copy(camera.position);
   sun.position.set(boat.x + 20, by + 45, boat.z + 16);
   sun.target.position.set(boat.x, by, boat.z);
@@ -2270,6 +2466,7 @@ function frame() {
     if (f.follow) { f.f.position.x = f.follow.x; f.f.position.z = f.follow.z; }
   }
   for (const w of whirls) w.mesh.rotation.z = time * 1.6;
+  for (const h of holes) h.mesh.rotation.z = time * 2.2;
   for (const cp of checkpoints) cp.buoys.forEach((b, j) => { b.g.position.y = b.y + 0.2 + Math.sin(time * 2 + j + cp.i) * 0.1; b.g.rotation.z = Math.sin(time * 1.5 + cp.i) * 0.12; });
 
   if (bubbleLife > 0) {
@@ -2279,6 +2476,7 @@ function frame() {
     if (bubbleLife <= 0) bubble.visible = false;
   }
   updateParticles(dt);
+  updateDetails(dt, time);
   updateCamera(dt, time);
 
   $('deaths').textContent = deaths;
@@ -2305,6 +2503,8 @@ window.__game = {
   boat, crew, get me() { return me; }, net, checkpoints, keys, get state() { return state; }, get deaths() { return deaths; }, respawn,
   setCp: i => { cpIndex = i; placeAtCheckpoint(); }, courseInfo, pointAtS, circles, balls, movers, riverH, buildMap,
   get segT() { return segT; }, get mapId() { return mapId; }, get time() { return time; },
+  faceView: on => { cam.faceView = on; },
+  get realFarts() { return realFarts.map(s => s.start.toFixed(2) + '+' + s.dur.toFixed(2)); }, holes,
   fartCheck: () => { audio(); return Object.keys(FART_TYPES).map(k => { const d = synthFart(k).getChannelData(0); let e = 0, nan = 0; for (const v of d) { if (Number.isNaN(v)) nan++; e += v * v; } return k + ':' + Math.sqrt(e / d.length).toFixed(3) + (nan ? ' NaN!' : ''); }); }, get finishS() { return FINISH_S; }, halfWidthAt,
   // pas de simulation sans affichage (pour les tests automatiques)
   tick: dt => { step(dt); animateCrew(dt, time); },
