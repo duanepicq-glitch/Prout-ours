@@ -49,6 +49,9 @@
   .chip { display: inline-flex; align-items: center; gap: 8px; background: #fff; border: 2px solid #d9dccf; border-radius: 999px; padding: 6px 14px; font-weight: 700; }
   .chip i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
   .count { width: 100%; font-size: 14px; opacity: .7; margin-top: 4px; }
+  .hudBtn { position: absolute; left: 16px; bottom: 20px; pointer-events: auto; font-family: inherit; font-weight: 700; font-size: 18px; color: #2f3a33; background: rgba(255,255,255,.92); border: none; border-radius: 999px; padding: 10px 18px; cursor: pointer; box-shadow: 0 4px 0 rgba(30,40,35,.25); }
+  .hudBtn:hover { background: #fff; transform: translateY(-1px); }
+  .hudBtn:active { transform: translateY(2px); box-shadow: 0 2px 0 rgba(30,40,35,.25); }
 </style>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script type="importmap">
@@ -66,12 +69,13 @@
     <div class="pill" id="roomPill" style="display:none">👥 <span id="roomInfo"></span></div>
   </div>
   <div id="help">
-    <b>Espace</b> (maintenir) : PROUT !<br>
+    <b>Espace</b> : prout vers l'avant ⬆️<br>
+    <b>Maj</b> ou <b>clic droit</b> : prout vers l'arrière ⬇️<br>
     <b>ZQSD</b> / flèches : te déplacer sur le radeau<br>
-    <b>E</b> ou <b>clic droit</b> : te retourner<br>
     <b>Clic gauche + souris</b> : caméra<br>
-    <b>R</b> : dernier point de passage · <b>M</b> : son
+    <b>R</b> : réinitialiser · <b>M</b> : son
   </div>
+  <button id="resetBtn" class="hudBtn" tabindex="-1">↺ Réinitialiser</button>
   <div id="toast"></div>
   <canvas id="boatMap" width="280" height="280"></canvas>
   <div id="gaugeWrap">
@@ -85,18 +89,18 @@
     <h1 class="title">Prout'Ours</h1>
     <p class="sub">Une bande de copains descend la rivière sur un radeau gonflable.<br>Le seul moteur ? <b>Leurs prouts !</b></p>
     <div class="rules">
-      🛟 Tout le monde est sur <b>le même radeau</b>.<br>
+      🛟 Tout le monde est sur <b>le même radeau</b>, chacun dans <b>son quart</b> (à sa couleur).<br>
       💨 Chaque prout pousse le radeau <b>depuis l'endroit où tu es assis</b>.<br>
       🔄 Prout à gauche → le radeau tourne à droite (et inversement).<br>
       ⛰️ Dans les descentes ça accélère, dans les montées il faut péter fort !<br>
       ☠️ <b>Ne touche pas les pointes</b> : le radeau crève et tu repars au dernier point de passage.
     </div>
     <div class="controls">
-      <span class="key">Espace</span><span>péter (maintenir = plus de gaz)</span>
-      <span class="key">Z Q S D</span><span>te déplacer autour du radeau</span>
-      <span class="key">E / clic droit</span><span>te retourner (péter dans l'autre sens)</span>
+      <span class="key">Espace</span><span>péter vers l'avant (là où regarde la caméra)</span>
+      <span class="key">Maj / clic droit</span><span>péter vers l'arrière (pour reculer)</span>
+      <span class="key">Z Q S D</span><span>te déplacer sur le radeau (dans ta zone en multijoueur)</span>
       <span class="key">Clic + souris</span><span>tourner la caméra</span>
-      <span class="key">R</span><span>revenir au dernier point de passage</span>
+      <span class="key">R / ↺</span><span>réinitialiser : revenir au dernier point de passage</span>
     </div>
     <input id="nameInput" class="field" maxlength="12" placeholder="Ton pseudo" autocomplete="off">
     <div class="menuBtns">
@@ -660,13 +664,13 @@ function spikedGate(s, half, amp, speed, phase) {
 }
 
 // Section 1 : premières boules et rochers
-rockAt(22, -4.5, 1.5); spikeBall(34, 4.2, 0, 0); rockAt(44, -4, 1.3);
+rockAt(22, -1, 1.5); spikeBall(34, 4.2, 0, 0); rockAt(44, -1.5, 1.3);
 // Section 2 : une boule qui balaie la rivière
 spikeBall(63, 0, 4, 0.7);
 // Section 3 : le tronc à pointes
 spikedLog(90, 4.5, 0.45);
 // Section 4 : montée avec rochers et une boule qui bouge
-rockAt(115, -3.5, 1.4); spikeBall(122, -6, 0, 0); rockAt(128, 3.5, 1.2);
+rockAt(115, -1.5, 1.4); spikeBall(122, -6, 0, 0); rockAt(128, 1.2, 1.2);
 // Section 5 : barrières à pointes
 spikedGate(147, 2.2, 5.5, 0.7, 0);
 spikedGate(158, 2.2, 5.5, 0.7, -1.5);
@@ -692,7 +696,7 @@ whirl.y = waterY(whirl.x, whirl.z);
   whirl.mesh.rotation.x = -Math.PI / 2; whirl.mesh.position.set(whirl.x, whirl.y + 0.04, whirl.z); scene.add(whirl.mesh);
 }
 // Section 7 : en bas du rapide, dernier passage avant l'arrivée
-rockAt(204, -4, 1.4); spikeBall(210, -4.5, 3, 0.9); spikeBall(217, 4.5, 0, 0);
+rockAt(204, -1.5, 1.4); spikeBall(210, -4.5, 3, 0.9); spikeBall(217, 4.5, 0, 0);
 
 // Points de passage (bouées)
 const checkpoints = [];
@@ -753,14 +757,24 @@ const boat = { x: 0, z: 4, y: 0, vx: 0, vz: 0, psi: 0, w: 0, tiltX: 0, tiltZ: 0 
 const MASS = 1, INERTIA = 3.2;
 const THRUST = 7.5, BURST = 1.6;
 const LIN_DRAG = 0.65, ANG_DRAG = 1.8, MAX_SPEED = 13;
-const SLOPE_G = 11, CURRENT = 0.5;
+const SLOPE_G = 9, CURRENT = 0.5;
 
 // =============================================================== LES PETITS BONSHOMMES
-const VESTS = [0xff7a1a, 0x2f8fe0, 0x3fae4a, 0xe8c21a];
+const VESTS = [0xffd23f, 0x2f8fe0, 0x3fae4a, 0xb44ad6];
 const HELMETS = [0xf2f2ee, 0xd63a2f, 0x2b3038, 0x7a4fd0];
 const SKINS = [0xf2c8a0, 0xc68b59, 0x8d5a3b, 0xf5d6b8];
-const SLOT_CSS = ['#ff7a1a', '#2f8fe0', '#3fae4a', '#d9b310'];
+const SLOT_CSS = ['#e0b000', '#2f8fe0', '#3fae4a', '#b44ad6'];
 const SEATS = [Math.PI, Math.PI / 2, -Math.PI / 2, 0];       // arrière, droite, gauche, avant
+const ZONE_HALF = 0.68;                                       // chaque zone fait un quart du radeau (avec une petite marge)
+// séparations entre les 4 zones (visibles en multijoueur)
+const dividers = new THREE.Group();
+for (let i = 0; i < 4; i++) {
+  const a = Math.PI / 4 + i * Math.PI / 2;
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.9, 8), toon(0x2b3038));
+  post.position.set(Math.sin(a) * RING, TUBE + 0.25, -Math.cos(a) * RING); dividers.add(post);
+  const knob = new THREE.Mesh(sphereGeo, toon(0xf2f2ee)); knob.scale.setScalar(0.14); knob.position.set(post.position.x, TUBE + 0.72, post.position.z); dividers.add(knob);
+}
+boatGroup.add(dividers);
 function makeGuy(slot) {
   const root = new THREE.Group();
   const model = new THREE.Group();
@@ -834,7 +848,13 @@ function addCrew(id, name, slot, isMe) {
   const b = makeGuy(slot);
   boatGroup.add(b.root);
   if (!isMe) b.root.add(makeLabel(name, SLOT_CSS[slot % 4]));
-  const m = { id, name, slot, bear: b, alpha: SEATS[slot % 4], netAlpha: null, face: 1, gauge: 1, farting: false, wantFart: false, empty: false, fartAnim: 0, flip: 0, blink: rand(1, 4), moving: 0 };
+  // la zone du joueur sur le radeau (visible en multijoueur)
+  const zone = new THREE.Group();
+  const arc = new THREE.Mesh(new THREE.TorusGeometry(RING, 0.16, 8, 28, ZONE_HALF * 2), toon(VESTS[slot % 4]));
+  arc.rotation.x = -Math.PI / 2; zone.add(arc);
+  zone.rotation.y = Math.PI / 2 - SEATS[slot % 4] - ZONE_HALF; zone.position.y = TUBE * 0.86;
+  boatGroup.add(zone);
+  const m = { id, name, slot, bear: b, zone, alpha: SEATS[slot % 4], netAlpha: null, dirYaw: boat.psi, back: false, gauge: 1, farting: false, wantFart: false, empty: false, fartAnim: 0, flip: 0, blink: rand(1, 4), moving: 0 };
   crew.push(m);
   return m;
 }
@@ -842,7 +862,17 @@ function removeCrew(id) {
   const i = crew.findIndex(m => m.id === id);
   if (i < 0) return;
   boatGroup.remove(crew[i].bear.root);
+  boatGroup.remove(crew[i].zone);
   crew.splice(i, 1);
+}
+// En multijoueur, chacun reste dans son quart du radeau
+function zoneClamp(m, alpha) {
+  if (net.role === 'solo') return alpha;
+  const c = SEATS[m.slot % 4];
+  let d = (alpha - c) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return c + clamp(d, -ZONE_HALF, ZONE_HALF);
 }
 let me = addCrew('local', 'Moi', 0, true);
 
@@ -924,8 +954,9 @@ function pop() {
 function resetGame() {
   cpIndex = -1; deaths = 0; runTime = 0;
   checkpoints.forEach(c => { c.active = false; c.buoys.forEach(b => b.band.material.color.set(0xe0432f)); });
-  crew.forEach(c => { c.alpha = SEATS[c.slot % 4]; c.netAlpha = null; c.face = 1; c.gauge = 1; c.wantFart = false; c.empty = false; c.farting = false; });
+  crew.forEach(c => { c.alpha = SEATS[c.slot % 4]; c.netAlpha = null; c.back = false; c.gauge = 1; c.wantFart = false; c.empty = false; c.farting = false; });
   placeAtCheckpoint();
+  crew.forEach(c => { c.dirYaw = boat.psi; });
 }
 
 // =============================================================== ENTRÉES
@@ -936,24 +967,33 @@ addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (state !== 'play') return;
-  if (e.code === 'Space' && !e.repeat) { me.wantFart = true; requestBurst(); sendInput(); }
-  if (e.code === 'KeyE' && !e.repeat) { flip(me); sendInput(); }
+  const fartKey = e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyE';
+  if (fartKey && !e.repeat) { updateFartKeys(); requestBurst(); sendInput(); }
   if (e.code === 'KeyR' && !e.repeat) requestRespawn();
   if (e.code === 'KeyM' && !e.repeat) { muted = !muted; if (muted) stopFartLoop(); toast(muted ? 'Son coupé' : 'Son activé'); }
 });
 addEventListener('keyup', e => {
   keys[e.code] = false;
-  if (e.code === 'Space') { me.wantFart = false; sendInput(); }
+  updateFartKeys(); sendInput();
 });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; me.wantFart = false; sendInput(); });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; updateFartKeys(); sendInput(); });
+// Espace = péter vers l'avant (là où regarde la caméra) ; Maj / E / clic droit = péter vers l'arrière
+function updateFartKeys() {
+  const fwd = !!keys.Space;
+  const bwd = !!(keys.ShiftLeft || keys.ShiftRight || keys.KeyE || keys.Mouse2);
+  const wasBack = me.back;
+  me.wantFart = fwd || bwd;
+  if (me.wantFart) me.back = bwd && !fwd;
+  if (me.back !== wasBack) { me.flip = 1; sfxTurn(); }
+}
 const canvas = renderer.domElement;
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('mousedown', e => {
   if (state !== 'play') return;
-  if (e.button === 2) { flip(me); sendInput(); }
+  if (e.button === 2) { keys.Mouse2 = true; updateFartKeys(); requestBurst(); sendInput(); }
   if (e.button === 0) cam.dragging = true;
 });
-addEventListener('mouseup', () => { cam.dragging = false; });
+addEventListener('mouseup', e => { cam.dragging = false; if (e.button === 2) { keys.Mouse2 = false; updateFartKeys(); sendInput(); } });
 addEventListener('mousemove', e => {
   if (!cam.dragging) return;
   cam.offset -= e.movementX * 0.005;
@@ -971,7 +1011,7 @@ function fmtTime(t) { const m = Math.floor(t / 60), s = Math.floor(t % 60); retu
 // =============================================================== PHYSIQUE DU RADEAU
 function seatLocal(alpha) { return { x: Math.sin(alpha) * RING, z: -Math.cos(alpha) * RING }; }
 function toWorldDir(lx, lz, psi) { const c = Math.cos(psi), s = Math.sin(psi); return { x: lx * c + lz * s, z: -lx * s + lz * c }; }
-function thrustDir(m) { return toWorldDir(0, -m.face, boat.psi); }  // face=1 : pousse vers l'avant du radeau
+function thrustDir(m) { return { x: -Math.sin(m.dirYaw), z: -Math.cos(m.dirYaw) }; }  // direction où le prout pousse le radeau
 
 function applyImpulse(px, pz, jx, jz) {
   boat.vx += jx / MASS; boat.vz += jz / MASS;
@@ -1001,7 +1041,6 @@ function requestBurst() {
 function requestRespawn() {
   if (net.role === 'client') netSend({ t: 'respawn' }); else respawn();
 }
-function flip(m) { m.face *= -1; m.flip = 1; if (m === me) sfxTurn(); }
 
 function resolveContact(nx, nz, depth) {
   boat.x += nx * depth; boat.z += nz * depth;
@@ -1076,18 +1115,21 @@ function collideBoat() {
 
 // Mon bonhomme : se déplacer autour du radeau (sur tous les écrans)
 function localControls(dt) {
+  const viewYaw = cam.yaw + cam.offset;
+  // le prout pousse vers l'avant de la caméra (ou vers l'arrière avec Maj)
+  me.dirYaw = viewYaw + (me.back ? Math.PI : 0);
+  me.alpha = zoneClamp(me, me.alpha);
   let ix = 0, iz = 0;
   if (keys.KeyW || keys.ArrowUp) iz += 1;
   if (keys.KeyS || keys.ArrowDown) iz -= 1;
   if (keys.KeyA || keys.ArrowLeft) ix -= 1;
   if (keys.KeyD || keys.ArrowRight) ix += 1;
   if (!ix && !iz) return;
-  const viewYaw = cam.yaw + cam.offset;
   const wx = -Math.sin(viewYaw) * iz + Math.cos(viewYaw) * ix;
   const wz = -Math.cos(viewYaw) * iz - Math.sin(viewYaw) * ix;
   const loc = toWorldDir(wx, wz, -boat.psi);
   const tang = Math.cos(me.alpha) * loc.x + Math.sin(me.alpha) * loc.z;
-  me.alpha += clamp(tang * 2.6, -2.6, 2.6) * dt;
+  me.alpha = zoneClamp(me, me.alpha + clamp(tang * 2.6, -2.6, 2.6) * dt);
 }
 
 function bonkFx(v) {
@@ -1208,7 +1250,7 @@ function broadcast(msg) { for (const c of net.conns.values()) if (c.open) { try 
 function netEvent(ev) { if (net.role === 'host') broadcast({ t: 'ev', ...ev }); }
 function sendInput() {
   if (net.role !== 'client' || state !== 'play') return;
-  netSend({ t: 'in', a: Math.round(me.alpha * 1000) / 1000, f: me.face, w: me.wantFart ? 1 : 0 });
+  netSend({ t: 'in', a: Math.round(me.alpha * 1000) / 1000, d: Math.round(me.dirYaw * 1000) / 1000, w: me.wantFart ? 1 : 0 });
 }
 function freeSlot() { for (let s = 0; s < 4; s++) if (!crew.some(m => m.slot === s)) return s; return -1; }
 
@@ -1290,7 +1332,7 @@ function hostReceive(conn, d) {
   }
   const m = crew.find(x => x.id === conn.peer);
   if (!m) return;
-  if (d.t === 'in') { m.netAlpha = +d.a || 0; m.face = d.f === -1 ? -1 : 1; m.wantFart = !!d.w; }
+  if (d.t === 'in') { m.netAlpha = zoneClamp(m, +d.a || 0); m.dirYaw = +d.d || 0; m.wantFart = !!d.w; }
   else if (d.t === 'burst') { if (state === 'play') fartBurst(m); }
   else if (d.t === 'respawn') { if (state === 'play') respawn(); }
 }
@@ -1299,7 +1341,7 @@ function broadcastState() {
   broadcast({
     t: 'st', s: state, tm: r(time), rt: r(runTime), cp: cpIndex, dz: deaths,
     b: [boat.x, boat.z, boat.vx, boat.vz, boat.psi, boat.w].map(r),
-    c: crew.map(m => [m.id, m.name, m.slot, r(m.alpha), m.face, m.farting ? 1 : 0, r(m.gauge), m.empty ? 1 : 0]),
+    c: crew.map(m => [m.id, m.name, m.slot, r(m.alpha), r(m.dirYaw), m.farting ? 1 : 0, r(m.gauge), m.empty ? 1 : 0]),
   });
 }
 
@@ -1354,7 +1396,7 @@ function applyState(d) {
     if (id === net.myId) {
       me = m;
       if (empty && !m.empty && state === 'play') toast('Plus de gaz !', 800);
-    } else { m.netAlpha = a; m.face = f; }
+    } else { m.netAlpha = a; m.dirYaw = f; }
     m.farting = !!farting; m.gauge = gauge; m.empty = !!empty;
   }
   net.target = { x: d.b[0], z: d.b[1], vx: d.b[2], vz: d.b[3], psi: d.b[4], w: d.b[5], at: performance.now() };
@@ -1370,7 +1412,7 @@ function applyState(d) {
   if (d.s !== state) {
     if (d.s === 'play') {
       $('lobby').classList.add('hidden'); $('win').classList.add('hidden'); $('menu').classList.add('hidden');
-      me.alpha = SEATS[me.slot % 4]; me.face = 1; me.wantFart = false;
+      me.alpha = SEATS[me.slot % 4]; me.back = false; me.wantFart = false;
       boat.x = d.b[0]; boat.z = d.b[1]; boat.psi = d.b[4]; cam.yaw = boat.psi; cam.offset = 0;
       state = 'play'; toast('C\'est parti !');
     } else if (d.s === 'win') { state = 'win'; showWin(); }
@@ -1408,6 +1450,8 @@ $('codeInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('join
 $('codeInput').addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5); });
 $('startBtn').addEventListener('click', () => { audio(); $('lobby').classList.add('hidden'); resetGame(); state = 'play'; toast('C\'est parti !'); });
 $('leaveBtn').addEventListener('click', () => leaveGame());
+$('resetBtn').addEventListener('mousedown', e => e.preventDefault());   // ne garde pas le focus (sinon Espace cliquerait dessus)
+$('resetBtn').addEventListener('click', () => { if (state === 'play') { requestRespawn(); toast('Réinitialisé !', 900); } });
 $('winLeave').addEventListener('click', () => leaveGame());
 $('againBtn').addEventListener('click', () => { $('win').classList.add('hidden'); resetGame(); state = 'play'; toast('C\'est reparti !'); });
 $('copyBtn').addEventListener('click', () => { try { navigator.clipboard.writeText(net.code); $('copyBtn').textContent = 'Copié !'; setTimeout(() => $('copyBtn').textContent = 'Copier', 1200); } catch (_) {} });
@@ -1426,7 +1470,7 @@ function animateCrew(dt, t) {
     const walk = m.moving > 0.3;
     const hop = (walk ? Math.abs(Math.sin(t * 14)) * 0.18 : 0) + m.fartAnim * 0.25 + m.flip * 0.4;
     b.root.position.set(s.x, 1.15 + hop, s.z);
-    const targetRot = m.face > 0 ? Math.PI : 0;
+    const targetRot = m.dirYaw + Math.PI - boat.psi;   // le bonhomme regarde là où il pousse (les fesses de l'autre côté)
     b.root.rotation.y = angleLerp(b.root.rotation.y, targetRot, 1 - Math.exp(-14 * dt));
     const shake = m.farting ? Math.sin(t * 50) * 0.04 : 0;
     b.model.rotation.set(m.fartAnim * 0.35 + shake, 0, (walk ? Math.sin(t * 14) * 0.12 : 0) + shake);
@@ -1493,13 +1537,31 @@ function drawBoatMap() {
   const toScreen = (lx, lz) => ({ x: cx + (lx * Math.cos(a) + lz * Math.sin(a)) * R / RING, y: cy + (-lx * Math.sin(a) + lz * Math.cos(a)) * R / RING });
   c.fillStyle = 'rgba(61,67,74,.35)'; c.beginPath(); c.arc(cx, cy, R - 12, 0, 7); c.fill();
   c.lineWidth = 26; c.strokeStyle = '#e2582c'; c.beginPath(); c.arc(cx, cy, R, 0, 7); c.stroke();
+  if (net.role !== 'solo') {
+    // les 4 zones du radeau, chacune à la couleur de son joueur
+    for (const m of crew) {
+      const cen = SEATS[m.slot % 4];
+      c.strokeStyle = SLOT_CSS[m.slot % 4]; c.lineWidth = 12; c.lineCap = 'butt'; c.beginPath();
+      for (let k = 0; k <= 20; k++) {
+        const al = cen - ZONE_HALF + k / 20 * ZONE_HALF * 2, s = seatLocal(al), p = toScreen(s.x, s.z);
+        k ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y);
+      }
+      c.stroke();
+    }
+    c.strokeStyle = '#2b3038'; c.lineWidth = 5;
+    for (let i = 0; i < 4; i++) {
+      const al = Math.PI / 4 + i * Math.PI / 2, s1 = seatLocal(al), a1 = toScreen(s1.x * 0.8, s1.z * 0.8), a2 = toScreen(s1.x * 1.2, s1.z * 1.2);
+      c.beginPath(); c.moveTo(a1.x, a1.y); c.lineTo(a2.x, a2.y); c.stroke();
+    }
+  }
   const f = toScreen(0, -RING * 1.38), f1 = toScreen(-0.35, -RING * 1.15), f2 = toScreen(0.35, -RING * 1.15);
   c.fillStyle = '#f2c14e'; c.strokeStyle = '#1f2420'; c.lineWidth = 4;
   c.beginPath(); c.moveTo(f.x, f.y); c.lineTo(f1.x, f1.y); c.lineTo(f2.x, f2.y); c.closePath(); c.fill(); c.stroke();
   const order = crew.filter(m => m !== me).concat(crew.includes(me) ? [me] : []);
   for (const m of order) {
     const s = seatLocal(m.alpha), p = toScreen(s.x, s.z);
-    const g = toScreen(s.x, s.z + m.face * 1.1);
+    const td = thrustDir(m), tl = toWorldDir(td.x, td.z, -boat.psi);
+    const g = toScreen(s.x - tl.x * 1.1, s.z - tl.z * 1.1);
     c.strokeStyle = m.farting ? '#8fbf4a' : 'rgba(31,36,32,.35)'; c.lineWidth = m.farting ? 12 : 6; c.lineCap = 'round';
     c.beginPath(); c.moveTo(p.x, p.y); c.lineTo(g.x, g.y); c.stroke();
     c.fillStyle = SLOT_CSS[m.slot % 4]; c.strokeStyle = m === me ? '#1f2420' : '#ffffff'; c.lineWidth = m === me ? 5 : 3;
@@ -1543,7 +1605,9 @@ function frame() {
   const fx = -Math.sin(boat.psi), fz = -Math.cos(boat.psi), rx = Math.cos(boat.psi), rz = -Math.sin(boat.psi);
   boatGroup.position.set(boat.x, boat.y + 0.05 + Math.sin(time * 1.8) * 0.08, boat.z);
   let tiltX = k * (fx * tg.x + fz * tg.z), tiltZ = k * (rx * tg.x + rz * tg.z);
-  for (const m of crew) { const s = seatLocal(m.alpha); tiltX += s.z * 0.025; tiltZ -= s.x * 0.025; if (m.farting) tiltX -= m.face * 0.04; }
+  for (const m of crew) { const s = seatLocal(m.alpha); tiltX += s.z * 0.025; tiltZ -= s.x * 0.025; }
+  dividers.visible = net.role !== 'solo';
+  for (const m of crew) m.zone.visible = net.role !== 'solo';
   boat.tiltX = damp(boat.tiltX, tiltX + Math.sin(time * 1.3) * 0.03, 5, dt);
   boat.tiltZ = damp(boat.tiltZ, tiltZ + Math.sin(time * 1.7) * 0.03 - boat.w * 0.03, 5, dt);
   boatGroup.rotation.set(boat.tiltX, boat.psi, boat.tiltZ);
